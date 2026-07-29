@@ -40,8 +40,8 @@
 #
 # Uso:
 #   ./setup-unbound.sh --dry-run
-#   ./setup-unbound.sh --acl "138.36.117.0/24 45.236.20.0/22"
-#   ./setup-unbound.sh --acl6 "2804:82ac::/32"
+#   ./setup-unbound.sh --acl "203.0.113.0/24 198.51.100.0/24"   # SEUS prefixos
+#   ./setup-unbound.sh --acl6 "2001:db8:abcd::/32"               # SEU prefixo v6
 #   ./setup-unbound.sh --check          # so valida o que ja esta instalado
 # =============================================================================
 set -uo pipefail
@@ -323,7 +323,7 @@ write_acl_conf() {
   if [[ -z "$ACL4$ACL6" ]]; then
     warn "nenhum prefixo proprio informado (--acl / --acl6)."
     warn "So RFC1918/CGNAT liberado. Clientes com IP publico seu serao RECUSADOS."
-    warn "  ./setup-unbound.sh --acl \"138.36.117.0/24\" --acl6 \"2804:82ac::/32\""
+    warn "  ./setup-unbound.sh --acl \"SEU.PREFIXO.0/24\" --acl6 \"SEU:PREFIXO::/32\""
   fi
   # a v1 tinha 2001:db8::/32 — prefixo de DOCUMENTACAO, nao serve para nada
   write_if_changed "$CONF_ACL" <<EOF
