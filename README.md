@@ -8,16 +8,58 @@ Ferramentas de upgrade, tuning e validação para frota Debian / Proxmox VE.
 
 ## Instalação
 
+### Remota (uma linha)
+
 ```bash
-tar xzf pkinfra-toolkit-2026.07.29.tar.gz
-cd pkinfra-toolkit-2026.07.29
-sha256sum -c CHECKSUMS.sha256     # confere integridade
+curl -fsSL https://raw.githubusercontent.com/pkthegod/pkinfra-toolkit/main/bootstrap.sh | sudo bash
+```
+
+O `bootstrap.sh` descobre o último release, baixa, confere integridade e
+chama o `install.sh` de dentro do pacote. Flags passam direto:
+
+```bash
+# ver o que faria, sem escrever nada
+curl -fsSL .../bootstrap.sh | sudo bash -s -- --dry-run
+
+# versão fixa + digest fixo — é assim que se instala em produção
+curl -fsSL .../bootstrap.sh | sudo bash -s -- --version 2026.07.29 --sha256 <hash>
+
+# forçar tudo, independente do papel do host
+curl -fsSL .../bootstrap.sh | sudo bash -s -- --all
+```
+
+> **Sobre confiar num `curl | bash`.** O `.sha256` publicado ao lado do
+> tarball só protege contra download corrompido — quem controlasse o release
+> controlaria os dois arquivos. Integridade de verdade vem de fixar o digest
+> com `--sha256`, e o valor sai das notas de cada release (ou do seu próprio
+> `./build.sh`, que é reproduzível). Em produção, fixe.
+
+### Manual (tarball do release)
+
+```bash
+V=2026.07.29
+curl -fsSLO https://github.com/pkthegod/pkinfra-toolkit/releases/download/v$V/pkinfra-toolkit-$V.tar.gz
+curl -fsSLO https://github.com/pkthegod/pkinfra-toolkit/releases/download/v$V/pkinfra-toolkit-$V.tar.gz.sha256
+sha256sum -c pkinfra-toolkit-$V.tar.gz.sha256
+
+tar xzf pkinfra-toolkit-$V.tar.gz
+cd pkinfra-toolkit-$V
+sha256sum -c CHECKSUMS.sha256     # confere item por item
 ./install.sh --dry-run            # ver o que faria
-./install.sh                      # instala conforme o papel detectado
+sudo ./install.sh                 # instala conforme o papel detectado
 ```
 
 O instalador detecta se é host Proxmox ou guest e instala só o que faz
 sentido. `--all` força tudo.
+
+### Frota
+
+```bash
+for h in $(cat hosts.txt); do
+  ssh "$h" "curl -fsSL https://raw.githubusercontent.com/pkthegod/pkinfra-toolkit/main/bootstrap.sh \
+            | sudo bash -s -- --version $V --sha256 $HASH"
+done
+```
 
 ---
 
@@ -163,3 +205,34 @@ manifest, histórico git) e `/etc/pkops/hooks.d`.
 Leia a **seção 5 do `TOOLKIT.md`** — catálogo de 28 bugs encontrados e
 corrigidos. Vários são falhas silenciosas: o script "funciona" e o efeito
 não existe. Reintroduzir qualquer um é regressão.
+
+---
+
+## Desenvolvimento e release
+
+```bash
+./build.sh                 # gera dist/pkinfra-toolkit-<VERSION>.tar.gz
+python -m pytest tests/ -q # testa o build: integridade, LF, reprodutibilidade
+shellcheck bin/*.sh lib/*.sh install.sh bootstrap.sh build.sh
+```
+
+**O build é reproduzível.** `uid/gid` zerados, `mtime` derivado do `VERSION`
+e `gzip -n` — dois builds da mesma árvore geram bytes idênticos. É o que
+permite conferir o digest de um release contra o código.
+
+**Para publicar uma versão:**
+
+```bash
+echo 2026.08.15 > VERSION
+git commit -am "release: 2026.08.15"
+git tag v2026.08.15
+git push origin main --tags     # o CI monta, verifica e publica o release
+```
+
+O workflow aborta se a tag não bater com o `VERSION` — sem release com
+versão divergente.
+
+**`.gitattributes` força LF.** Num checkout Windows, CRLF no shebang faz o
+Linux responder `no such file or directory` apontando para um interpretador
+que existe. O `build.sh` normaliza de novo por garantia, e o
+`tests/test_build.py` falha se um `\r` chegar ao pacote.

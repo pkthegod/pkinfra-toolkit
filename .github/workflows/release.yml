@@ -1,0 +1,98 @@
+name: release
+
+# Dispara ao empurrar uma tag v* — a tag e o gate humano. Nada e publicado
+# automaticamente a partir de um push na main.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'tag ja existente para (re)publicar'
+        required: true
+
+permissions:
+  contents: write   # necessario para criar o release e subir os assets
+
+jobs:
+  publicar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: a tag tem de bater com o arquivo VERSION
+        run: |
+          TAG="${GITHUB_REF_NAME:-${{ inputs.tag }}}"
+          V=$(tr -d ' \n\r' < VERSION)
+          if [ "$TAG" != "v${V}" ]; then
+            echo "::error::tag ${TAG} divergente de VERSION (${V}) — suba VERSION antes de taggear"
+            exit 1
+          fi
+          echo "VERSAO=${V}" >> "$GITHUB_ENV"
+
+      - name: shellcheck
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+          shellcheck --severity=warning --exclude=SC1090,SC1091 \
+            bootstrap.sh build.sh install.sh lib/*.sh bin/*.sh
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: testes do build
+        run: |
+          python -m pip install --quiet pytest
+          python -m pytest tests/ -q
+
+      - name: build
+        run: ./build.sh
+
+      - name: verifica o artefato antes de publicar
+        run: |
+          tar xzf "dist/pkinfra-toolkit-${VERSAO}.tar.gz" -C /tmp
+          ( cd "/tmp/pkinfra-toolkit-${VERSAO}" && sha256sum -c --quiet CHECKSUMS.sha256 )
+          echo "SHA256=$(cut -d' ' -f1 < "dist/pkinfra-toolkit-${VERSAO}.tar.gz.sha256")" >> "$GITHUB_ENV"
+
+      - name: notas do release
+        run: |
+          cat > /tmp/notas.md <<EOF
+          ## pkinfra-toolkit ${VERSAO}
+
+          ### Instalacao
+
+          \`\`\`bash
+          curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/bootstrap.sh \\
+            | sudo bash -s -- --version ${VERSAO} --sha256 ${SHA256}
+          \`\`\`
+
+          Sem \`--sha256\` o bootstrap confere o digest publicado ao lado do
+          tarball; fixar o valor acima e o que protege de verdade.
+
+          ### Manual
+
+          \`\`\`bash
+          curl -fsSLO https://github.com/${GITHUB_REPOSITORY}/releases/download/v${VERSAO}/pkinfra-toolkit-${VERSAO}.tar.gz
+          echo "${SHA256}  pkinfra-toolkit-${VERSAO}.tar.gz" | sha256sum -c
+          tar xzf pkinfra-toolkit-${VERSAO}.tar.gz
+          cd pkinfra-toolkit-${VERSAO}
+          sha256sum -c CHECKSUMS.sha256
+          sudo ./install.sh --dry-run
+          sudo ./install.sh
+          \`\`\`
+
+          **sha256 do tarball:** \`${SHA256}\`
+
+          Build reproduzivel: \`./build.sh\` nesta tag gera bytes identicos.
+          EOF
+
+      - name: publica
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name || inputs.tag }}
+          name: pkinfra-toolkit ${{ env.VERSAO }}
+          body_path: /tmp/notas.md
+          files: |
+            dist/pkinfra-toolkit-${{ env.VERSAO }}.tar.gz
+            dist/pkinfra-toolkit-${{ env.VERSAO }}.tar.gz.sha256

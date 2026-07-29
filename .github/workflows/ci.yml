@@ -1,0 +1,96 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: shellcheck
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+          # SC1090/SC1091: o source de caminho dinamico (pkops.sh) e proposital
+          shellcheck --severity=warning --exclude=SC1090,SC1091 \
+            bootstrap.sh build.sh install.sh lib/*.sh bin/*.sh
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: pytest do build
+        run: |
+          python -m pip install --quiet pytest
+          python -m pytest tests/ -q
+
+      - name: build do tarball
+        run: ./build.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pkinfra-toolkit-dist
+          path: dist/
+
+  # O instalador roda como root e escreve em /usr/local — so vale testar num
+  # Debian descartavel, igual ao alvo real da frota.
+  instalacao:
+    runs-on: ubuntu-latest
+    needs: build
+    container:
+      image: debian:bookworm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: dependencias minimas
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends \
+            bash tar gzip coreutils findutils ca-certificates
+
+      - name: build e integridade
+        run: |
+          ./build.sh --outdir /tmp/dist
+          V=$(tr -d ' \n\r' < VERSION)
+          tar xzf "/tmp/dist/pkinfra-toolkit-${V}.tar.gz" -C /tmp
+          cd "/tmp/pkinfra-toolkit-${V}"
+          sha256sum -c --quiet CHECKSUMS.sha256
+
+      - name: install.sh --dry-run nao escreve nada
+        run: |
+          V=$(tr -d ' \n\r' < VERSION)
+          cd "/tmp/pkinfra-toolkit-${V}"
+          ./install.sh --dry-run
+          test ! -e /usr/local/sbin/pkassess.sh
+
+      - name: install.sh --all e idempotencia
+        run: |
+          V=$(tr -d ' \n\r' < VERSION)
+          cd "/tmp/pkinfra-toolkit-${V}"
+          ./install.sh --all
+          test -x /usr/local/sbin/pkassess.sh
+          test -x /usr/local/sbin/pkops
+          test -f /usr/local/lib/pkops.sh
+          # rodar duas vezes = rodar uma vez
+          ./install.sh --all
+
+      - name: uninstall preserva estado
+        run: |
+          V=$(tr -d ' \n\r' < VERSION)
+          cd "/tmp/pkinfra-toolkit-${V}"
+          ./install.sh --uninstall
+          test ! -e /usr/local/sbin/pkassess.sh
+          test -d /var/lib/pkops
