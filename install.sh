@@ -117,6 +117,10 @@ done
 # --- inicializa a camada de estado -------------------------------------------
 if [[ $DRY -eq 0 && -f "${LIBDIR}/pkops.sh" ]]; then
   head1 "Estado"
+  # SC2034: TOOL e VERSION parecem mortos, mas sao a ENTRADA do pkops.sh —
+  # ele le as duas ao ser sourced para etiquetar os eventos que emitirmos.
+  # Contrato documentado no cabecalho de lib/pkops.sh.
+  # shellcheck disable=SC2034
   TOOL="install"; VERSION="1.0"
   # shellcheck source=/dev/null
   . "${LIBDIR}/pkops.sh"

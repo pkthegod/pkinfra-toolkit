@@ -238,7 +238,10 @@ pci_passthrough_count() { grep -lE '^hostpci[0-9]+:' /etc/pve/qemu-server/*.conf
 bench_save() {
   command -v pveperf >/dev/null || { warn "pveperf indisponivel"; return 1; }
   mkdir -p "$BENCH_DIR"
-  local f="$BENCH_DIR/pve$(pve_major)-$(uname -r).txt"
+  # declaracao separada da atribuicao: `local f=$(...)` engole o status de
+  # saida do subshell (SC2155) e um pve_major que falhe passaria calado.
+  local f
+  f="$BENCH_DIR/pve$(pve_major)-$(uname -r).txt"
   [[ -f "$f" ]] && { info "baseline ja existe: $(basename "$f")"; return 0; }
   info "rodando pveperf (~30s)"
   local out; out=$(pveperf 2>/dev/null) || return 1
@@ -971,6 +974,9 @@ show_status() {
   fi
   if [[ -f "$EVENT_LOG" ]]; then
     head1 "Historico (ultimos 15, ambos os scripts)"
+    # SC2034: h e vr nao sao impressos, mas sustentam as POSICOES do campo.
+    # Sem eles, tl/ev/det leriam a coluna errada da linha de evento.
+    # shellcheck disable=SC2034
     tail -15 "$EVENT_LOG" | while IFS='|' read -r ts h tl vr ev det; do
       printf '  %s  %-12s %-20s %s\n' "${ts:0:19}" "$tl" "$ev" "$det"
     done

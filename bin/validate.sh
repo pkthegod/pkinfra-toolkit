@@ -189,7 +189,9 @@ mod_tuning() {
 
   # tuning do host PVE (estado compartilhado do proxmox_tune.sh)
   if [[ -d "${STATE_ROOT}/tune" ]]; then
-    local f="${STATE_ROOT}/tune/state-$(uname -r).env"
+    # declaracao separada: `local f=$(...)` mascara o status do subshell (SC2155)
+    local f
+    f="${STATE_ROOT}/tune/state-$(uname -r).env"
     [[ -f "$f" ]] && ok_ "proxmox_tune" "aplicado neste kernel" \
                   || warn_ "proxmox_tune" "sem estado para o kernel atual — re-rode"
   fi

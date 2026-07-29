@@ -138,7 +138,19 @@ pk_state_get() { # <componente> [chave]
     else cat "$f"; fi
 }
 
-pk_state_list() { ls -1 "$PK_STATE"/*.env 2>/dev/null | xargs -r -n1 basename | sed 's/\.env$//'; }
+pk_state_list() {
+    # glob direto em vez de `ls | xargs basename`: nao depende de como o ls
+    # formata nome nenhum, e o nullglob evita devolver o proprio padrao
+    # quando o diretorio esta vazio.
+    local f n
+    shopt -q nullglob; local tinha_nullglob=$?
+    shopt -s nullglob
+    for f in "$PK_STATE"/*.env; do
+        n=${f##*/}
+        printf '%s\n' "${n%.env}"
+    done
+    [[ $tinha_nullglob -eq 0 ]] || shopt -u nullglob
+}
 
 # --- defasagem ---------------------------------------------------------------
 # Um estado esta DEFASADO se foi aplicado em outro kernel. Todo tuning de
@@ -246,7 +258,7 @@ _drift_hooks() {
 cmd_drift() {
     pk_init
     _h "Deriva: declarado x real"
-    local out sev name det total_w=0 total_f=0 fn
+    local sev name det total_w=0 total_f=0 fn
     for fn in $(declare -F | awk '{print $3}' | grep '^_drift_'); do
         while IFS='|' read -r sev name det; do
             [[ -z "$sev" ]] && continue
@@ -360,6 +372,10 @@ cmd_timeline() {
     local n="${1:-40}"
     _h "Historico (ultimos ${n})"
     [[ -f "$PK_EVENTS" ]] || { _p "  sem eventos"; return 0; }
+    # SC2034: vv nao e lido, mas TEM de existir — o read e posicional e sem
+    # ele os campos ev/det viriam deslocados. Remover a variavel quebra o
+    # parsing da linha de evento.
+    # shellcheck disable=SC2034
     tail -"$n" "$PK_EVENTS" | while IFS='|' read -r ts h t vv ev det; do
         local col="$C_0"
         case "$ev" in
