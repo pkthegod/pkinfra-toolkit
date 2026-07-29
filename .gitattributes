@@ -1,0 +1,17 @@
+# Line-ending: LF obrigatorio em tudo que roda no Linux.
+#
+# Sem isto, um checkout no Windows converte para CRLF e o \r no shebang faz
+# o kernel responder "no such file or directory" apontando para um
+# interpretador que existe. Ja aconteceu com scripts/pkops.sh no repo de
+# origem; aqui a regra e explicita.
+* text=auto eol=lf
+
+*.sh        text eol=lf
+*.example   text eol=lf
+*.md        text eol=lf
+*.yml       text eol=lf
+VERSION     text eol=lf
+LICENSE     text eol=lf
+
+*.tar.gz    binary
+*.sha256    text eol=lf

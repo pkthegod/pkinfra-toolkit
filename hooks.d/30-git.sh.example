@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Versiona o manifest a cada mudanca de estado.
+# Historico auditavel de graca:  git -C /var/lib/pkops log -p manifest.md
+[[ "$1" == state.set || "$1" == manifest.generated ]] || exit 0
+cd "$PK_ROOT" || exit 0
+if [[ ! -d .git ]]; then
+  git init -q
+  git config user.email "pkops@$(hostname)"
+  git config user.name  "pkops"
+  printf "*.jsonl\n*.log\n" > .gitignore
+fi
+git add manifest.md manifest.json state/ facts.env .gitignore 2>/dev/null
+git diff --cached --quiet 2>/dev/null || \
+  git commit -qm "[$PK_TOOL] $1 ${2}" 2>/dev/null

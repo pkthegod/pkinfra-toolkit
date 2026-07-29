@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Manda o evento para um item trapper do Zabbix.
+# Crie o item "pkops.event" (tipo: Zabbix trapper, texto) no template do host.
+command -v zabbix_sender >/dev/null || exit 0
+ZBX_SERVER="${ZBX_SERVER:-127.0.0.1}"
+zabbix_sender -z "$ZBX_SERVER" -s "$PK_HOST" -k "pkops.event" \
+  -o "$1 ${2}" >/dev/null 2>&1 || true

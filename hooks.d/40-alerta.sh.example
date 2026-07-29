@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# So reage a evento ruim. Troque o logger por curl/webhook/mail.
+case "$1" in
+  *fail*|*FAIL*|ABORT*|*.stale|hook.failed) : ;;
+  *) exit 0 ;;
+esac
+logger -t pkops -p daemon.warning "[$PK_TOOL] $1 ${2}"
+# Exemplo de webhook:
+# curl -sm5 -X POST "$WEBHOOK_URL" \
+#   -H "Content-Type: application/json" \
+#   -d "{\"host\":\"$PK_HOST\",\"event\":\"$1\",\"detail\":\"$2\"}" >/dev/null 2>&1 || true

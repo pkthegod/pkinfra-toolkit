@@ -1,0 +1,11 @@
+# artefatos de release: regenerados por ./build.sh a partir da arvore
+dist/
+*.tar.gz
+*.tar.gz.sha256
+
+# o CHECKSUMS mora dentro do pacote, gerado no build — nunca versionado
+CHECKSUMS.sha256
+
+__pycache__/
+.pytest_cache/
+*.pyc

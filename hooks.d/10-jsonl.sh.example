@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# $1=evento $2=detalhe $3=timestamp | env: PK_TOOL PK_VERSION PK_HOST PK_ROOT
+printf "{\"ts\":\"%s\",\"host\":\"%s\",\"tool\":\"%s\",\"event\":\"%s\",\"detail\":\"%s\"}\n" \
+  "$3" "$PK_HOST" "$PK_TOOL" "$1" "${2//\"/\\\"}" >> "${PK_ROOT}/events.jsonl"
