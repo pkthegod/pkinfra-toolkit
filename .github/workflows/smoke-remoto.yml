@@ -25,6 +25,12 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: debian:bookworm
+    # Em job com container o Actions cai para `sh`, que nao tem pipefail.
+    # Declarado explicitamente para os steps rodarem no mesmo shell que a
+    # frota usa.
+    defaults:
+      run:
+        shell: bash
     steps:
       - name: dependencias de um host cru
         run: |
