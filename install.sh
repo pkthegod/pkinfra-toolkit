@@ -120,8 +120,14 @@ if [[ $DRY -eq 0 && -f "${LIBDIR}/pkops.sh" ]]; then
   # SC2034: TOOL e VERSION parecem mortos, mas sao a ENTRADA do pkops.sh —
   # ele le as duas ao ser sourced para etiquetar os eventos que emitirmos.
   # Contrato documentado no cabecalho de lib/pkops.sh.
+  #
+  # Uma diretiva por linha: `disable` vale para o COMANDO seguinte, e
+  # `TOOL=...; VERSION=...` na mesma linha sao dois comandos — a segunda
+  # atribuicao ficava de fora e o gate seguia vermelho.
   # shellcheck disable=SC2034
-  TOOL="install"; VERSION="1.0"
+  TOOL="install"
+  # shellcheck disable=SC2034
+  VERSION="1.0"
   # shellcheck source=/dev/null
   . "${LIBDIR}/pkops.sh"
   pk_init && ok "/var/lib/pkops inicializado (migra diretorios legados)"
