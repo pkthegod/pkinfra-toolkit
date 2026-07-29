@@ -216,9 +216,22 @@ python -m pytest tests/ -q # testa o build: integridade, LF, reprodutibilidade
 shellcheck bin/*.sh lib/*.sh install.sh bootstrap.sh build.sh
 ```
 
-**O build é reproduzível.** `uid/gid` zerados, `mtime` derivado do `VERSION`
-e `gzip -n` — dois builds da mesma árvore geram bytes idênticos. É o que
-permite conferir o digest de um release contra o código.
+**O build é reproduzível — no nível do `.tar`.** `uid/gid` zerados, `mtime`
+derivado do `VERSION`, modo de cada membro vindo do `--mode` do `tar` (nunca
+do filesystem, que no Windows não representa `0644` fielmente) e conteúdo
+normalizado para LF. O mesmo commit gera **o mesmo `.tar` byte a byte em
+qualquer host**, e é isso que permite conferir um release contra o código:
+
+```bash
+git checkout v2026.07.29 && ./build.sh
+# compare dist/pkinfra-toolkit-2026.07.29.tar.sha256 com o publicado no release
+```
+
+O digest do **`.tar.gz`** não atravessa hosts: a saída do gzip varia entre
+versões do compressor. Por isso o `build.sh` emite os dois digests e o
+release publica os dois — para comparar entre máquinas diferentes, use o do
+`.tar`; o do `.tar.gz` serve para conferir o download que você acabou de
+fazer.
 
 **Para publicar uma versão:**
 

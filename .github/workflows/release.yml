@@ -54,6 +54,7 @@ jobs:
           tar xzf "dist/pkinfra-toolkit-${VERSAO}.tar.gz" -C /tmp
           ( cd "/tmp/pkinfra-toolkit-${VERSAO}" && sha256sum -c --quiet CHECKSUMS.sha256 )
           echo "SHA256=$(cut -d' ' -f1 < "dist/pkinfra-toolkit-${VERSAO}.tar.gz.sha256")" >> "$GITHUB_ENV"
+          echo "SHA256TAR=$(cat "dist/pkinfra-toolkit-${VERSAO}.tar.sha256")" >> "$GITHUB_ENV"
 
       - name: notas do release
         run: |
@@ -82,9 +83,22 @@ jobs:
           sudo ./install.sh
           \`\`\`
 
-          **sha256 do tarball:** \`${SHA256}\`
+          ### Digests
 
-          Build reproduzivel: \`./build.sh\` nesta tag gera bytes identicos.
+          | Arquivo | sha256 |
+          |---|---|
+          | \`pkinfra-toolkit-${VERSAO}.tar.gz\` | \`${SHA256}\` |
+          | \`.tar\` interno (sem gzip) | \`${SHA256TAR}\` |
+
+          Para conferir este release contra o codigo, em qualquer maquina:
+
+          \`\`\`bash
+          git checkout v${VERSAO} && ./build.sh
+          cat dist/pkinfra-toolkit-${VERSAO}.tar.sha256   # deve dar ${SHA256TAR}
+          \`\`\`
+
+          Use o digest do \`.tar\` para comparar entre hosts: a saida do gzip
+          varia entre versoes do compressor, a do tar nao.
           EOF
 
       - name: publica
@@ -96,3 +110,4 @@ jobs:
           files: |
             dist/pkinfra-toolkit-${{ env.VERSAO }}.tar.gz
             dist/pkinfra-toolkit-${{ env.VERSAO }}.tar.gz.sha256
+            dist/pkinfra-toolkit-${{ env.VERSAO }}.tar.sha256

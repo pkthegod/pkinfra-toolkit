@@ -168,6 +168,39 @@ def test_executaveis_preservam_bit_de_execucao(artefato):
                 assert m.mode & 0o111, f"{m.name} sem bit de execucao"
 
 
+def test_modos_no_tarball_sao_exatos_e_independem_do_host():
+    """O modo tem de vir do --mode do tar, nunca do filesystem que empacotou.
+
+    No NTFS o chmod do build nao adere: os hooks .example saiam 0644 no CI e
+    0755 no Windows, e o mesmo commit gerava tarballs diferentes conforme
+    quem rodou o build. Modo e conteudo do artefato nao podem depender do
+    sistema de arquivos da maquina de quem empacota.
+    """
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        proc = _build(tmp)
+        assert proc.returncode == 0, proc.stderr
+        tarball = next(Path(tmp).glob("*.tar.gz"))
+        prefixo = f"pkinfra-toolkit-{VERSION}"
+
+        errados = []
+        with tarfile.open(tarball) as tf:
+            for m in tf.getmembers():
+                rel = m.name[len(prefixo) + 1 :] if m.name != prefixo else "."
+                if m.isdir():
+                    esperado = 0o755
+                elif rel.endswith(".sh") and not rel.endswith(".example"):
+                    esperado = 0o755
+                else:
+                    # docs, README, CHECKSUMS e os hooks .example
+                    esperado = 0o644
+                if (m.mode & 0o777) != esperado:
+                    errados.append(f"{rel}: {oct(m.mode & 0o777)} != {oct(esperado)}")
+
+        assert not errados, "modos divergentes no pacote:\n  " + "\n  ".join(errados)
+
+
 def test_tarball_e_reproduzivel(tmp_path):
     """Dois builds seguidos geram bytes identicos — uid/gid/mtime fixos."""
     a, b = tmp_path / "a", tmp_path / "b"

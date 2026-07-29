@@ -69,10 +69,13 @@ while IFS= read -r -d '' f; do
   esac
 done < <(find "$DEST" -type f -print0)
 
-# permissoes deterministicas
-find "$DEST" -type f -name '*.sh' -exec chmod 0755 {} +
-find "$DEST" -type f ! -name '*.sh' -exec chmod 0644 {} +
-chmod 0755 "${DEST}/install.sh"
+# NAO ha chmod no stage de proposito. O modo dos membros vem do --mode do tar,
+# mais abaixo.
+#
+# Motivo: num checkout Windows o chmod nao adere ao NTFS. O build gravava os
+# hooks .example como 0755 aqui e 0644 no runner Linux — mesmo commit, dois
+# tarballs diferentes. Enquanto o modo vier do filesystem, o artefato depende
+# da maquina que empacotou, e "reproduzivel" e so uma palavra no README.
 
 # CHECKSUMS por ultimo — cobre tudo menos a si proprio.
 #
@@ -91,21 +94,40 @@ if grep -q 'CHECKSUMS\.sha256' "$SUMS"; then
   exit 1
 fi
 mv "$SUMS" "${DEST}/CHECKSUMS.sha256"
-chmod 0644 "${DEST}/CHECKSUMS.sha256"
 
 mkdir -p "$OUTDIR"
 ALVO="${OUTDIR}/${PREFIXO}.tar.gz"
+TAR_TMP="${STAGE}/saida.tar"
 
-tar --sort=name \
-    --owner=0 --group=0 --numeric-owner \
-    --mtime="$MTIME" \
-    --format=gnu \
-    -cf - -C "$STAGE" "$PREFIXO" \
-  | gzip -n -9 > "$ALVO"
+# Empacota em DUAS passadas, cada uma com --mode fixo. E o que torna o modo
+# independente do filesystem de origem. --no-recursion porque os caminhos sao
+# todos listados a mao: nada entra sem estar declarado.
+LISTA_755=("$PREFIXO")
+for d in bin docs hooks.d lib; do LISTA_755+=("${PREFIXO}/${d}"); done
+LISTA_644=("${PREFIXO}/CHECKSUMS.sha256")
+for f in "${CONTEUDO[@]}"; do
+  case "$f" in
+    install.sh|lib/*.sh|bin/*.sh) LISTA_755+=("${PREFIXO}/${f}") ;;
+    *)                            LISTA_644+=("${PREFIXO}/${f}") ;;
+  esac
+done
 
+TAR_COMUM=(--sort=name --owner=0 --group=0 --numeric-owner
+           --mtime="$MTIME" --format=gnu --no-recursion -C "$STAGE")
+
+tar "${TAR_COMUM[@]}" --mode=0755 -cf "$TAR_TMP" "${LISTA_755[@]}"
+tar "${TAR_COMUM[@]}" --mode=0644 -rf "$TAR_TMP" "${LISTA_644[@]}"
+
+# O digest do .tar e a garantia de reprodutibilidade que atravessa
+# plataformas; o do .tar.gz depende da versao do gzip que comprimiu, entao
+# publicamos os dois e a verificacao entre hosts diferentes usa o do .tar.
+sha256sum "$TAR_TMP" | cut -d' ' -f1 > "${OUTDIR}/${PREFIXO}.tar.sha256"
+
+gzip -n -9 < "$TAR_TMP" > "$ALVO"
 sha256sum "$ALVO" | sed "s#${OUTDIR}/##" > "${ALVO}.sha256"
 
 echo "build ok: ${ALVO}"
-echo "  versao : ${VERSION}"
-echo "  sha256 : $(cut -d' ' -f1 < "${ALVO}.sha256")"
-echo "  itens  : ${#CONTEUDO[@]} + CHECKSUMS.sha256"
+echo "  versao      : ${VERSION}"
+echo "  sha256 .tar : $(cat "${OUTDIR}/${PREFIXO}.tar.sha256")"
+echo "  sha256 .gz  : $(cut -d' ' -f1 < "${ALVO}.sha256")"
+echo "  itens       : ${#CONTEUDO[@]} + CHECKSUMS.sha256"
