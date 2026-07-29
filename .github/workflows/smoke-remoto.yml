@@ -1,0 +1,89 @@
+name: smoke-remoto
+
+# Exercita o caminho EXATO que a frota usa: curl na URL raw do bootstrap,
+# consulta a API de releases, download, verificacao e instalacao. O job de
+# `instalacao` do ci.yml testa o install.sh a partir da arvore local; este
+# testa a rede — descoberta de versao, asset publicado, digest.
+#
+# Rode depois de publicar um release, ou quando desconfiar do caminho remoto.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'versao a instalar (vazio = ultimo release)'
+        required: false
+      ref:
+        description: 'branch/tag de onde baixar o bootstrap.sh'
+        required: false
+        default: 'main'
+
+permissions:
+  contents: read
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+    container:
+      image: debian:bookworm
+    steps:
+      - name: dependencias de um host cru
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends \
+            curl ca-certificates tar gzip coreutils findutils
+
+      - name: bootstrap --dry-run nao deve instalar nada
+        env:
+          REF: ${{ inputs.ref || 'main' }}
+          VER: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          ARGS="--dry-run"
+          [ -n "${VER}" ] && ARGS="--version ${VER} ${ARGS}"
+          curl -fsSL "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${REF}/bootstrap.sh" \
+            | bash -s -- $ARGS
+          if [ -e /usr/local/sbin/pkassess.sh ]; then
+            echo "::error::--dry-run instalou de verdade"
+            exit 1
+          fi
+
+      - name: bootstrap de verdade
+        env:
+          REF: ${{ inputs.ref || 'main' }}
+          VER: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          ARGS="--all"
+          [ -n "${VER}" ] && ARGS="--version ${VER} ${ARGS}"
+          curl -fsSL "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${REF}/bootstrap.sh" \
+            | bash -s -- $ARGS
+
+      - name: o que a frota espera encontrar depois
+        run: |
+          set -euo pipefail
+          for b in pkassess.sh pve-upgrade.sh proxmox_tune.sh tune-profile.sh \
+                   setup-unbound.sh validate.sh pkops; do
+            test -x "/usr/local/sbin/${b}" || { echo "::error::ausente: ${b}"; exit 1; }
+          done
+          test -f /usr/local/lib/pkops.sh
+          test -d /etc/pkops/hooks.d
+          test -f /usr/local/share/pkinfra/TOOLKIT.md
+          test -f /usr/local/share/pkinfra/RUNBOOK.md
+          test -d /var/lib/pkops
+          echo "instalacao remota completa"
+
+      - name: digest errado tem de ABORTAR
+        env:
+          REF: ${{ inputs.ref || 'main' }}
+        run: |
+          set -euo pipefail
+          # O --sha256 e a unica protecao real do caminho curl|bash. Se um
+          # digest falso passar, a flag e decorativa e o release seguinte
+          # poderia ser trocado sem ninguem notar.
+          if curl -fsSL "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${REF}/bootstrap.sh" \
+               | bash -s -- --sha256 0000000000000000000000000000000000000000000000000000000000000000 --dry-run
+          then
+            echo "::error::bootstrap aceitou digest falso"
+            exit 1
+          fi
+          echo "digest falso rejeitado, como deve"
