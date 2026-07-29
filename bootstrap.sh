@@ -33,7 +33,8 @@ C_R=$'\e[31m'; C_G=$'\e[32m'; C_Y=$'\e[33m'; C_B=$'\e[36m'; C_0=$'\e[0m'
 ok()   { printf '  %sOK%s   %s\n' "$C_G" "$C_0" "$*"; }
 info() { printf '  %s::%s   %s\n' "$C_B" "$C_0" "$*"; }
 warn() { printf '  %s!!%s   %s\n' "$C_Y" "$C_0" "$*"; }
-die()  { printf '  %sXX%s   %s\n' "$C_R" "$C_0" "$*" >&2; exit 1; }
+err()  { printf '  %sXX%s   %s\n' "$C_R" "$C_0" "$*" >&2; }
+die()  { err "$*"; exit 1; }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -51,7 +52,9 @@ for dep in tar sha256sum; do
   command -v "$dep" >/dev/null 2>&1 || die "dependencia ausente: ${dep}"
 done
 
+TEM_CURL=0
 if command -v curl >/dev/null 2>&1; then
+  TEM_CURL=1
   baixar() { curl -fsSL --retry 3 --retry-delay 2 -o "$2" "$1"; }
   ler()    { curl -fsSL --retry 3 --retry-delay 2 "$1"; }
 elif command -v wget >/dev/null 2>&1; then
@@ -61,14 +64,53 @@ else
   die "nem curl nem wget disponiveis"
 fi
 
+# Descobre a tag do ultimo release pelo REDIRECT de /releases/latest, nao pela
+# API.
+#
+# A API sem token permite 60 requisicoes por hora POR IP. Uma frota de
+# centenas de maquinas atras do mesmo NAT estoura esse teto e a instalacao
+# passa a falhar em parte dos hosts, de forma intermitente — o pior modo de
+# falhar, porque parece problema da maquina. O redirect de /releases/latest
+# nao e limitado assim.
+descobrir_tag() {
+  local url
+  if [[ $TEM_CURL -eq 1 ]]; then
+    url=$(curl -fsSL -o /dev/null -w '%{url_effective}' \
+          "https://github.com/${REPO}/releases/latest" 2>/dev/null) || return 1
+  else
+    url=$(wget -q -O /dev/null --max-redirect=10 \
+          "https://github.com/${REPO}/releases/latest" 2>&1 >/dev/null; \
+          wget -q -S -O /dev/null "https://github.com/${REPO}/releases/latest" 2>&1 \
+          | grep -i '^ *location:' | tail -1 | sed 's/.*: *//' | tr -d '\r') || return 1
+  fi
+  case "$url" in
+    */releases/tag/*) printf '%s\n' "${url##*/tag/}" ;;
+    *) return 1 ;;
+  esac
+}
+
 printf '\n%s== pkinfra-toolkit ==%s\n' "$C_B" "$C_0"
 
 # --- descobre a versao -------------------------------------------------------
 if [[ -z "$VERSAO" ]]; then
-  info "consultando ultimo release de ${REPO}"
-  TAG=$(ler "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null \
-        | grep -m1 '"tag_name"' | sed -E 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/') || true
-  [[ -n "${TAG:-}" ]] || die "nenhum release publicado em ${REPO} (ou API inacessivel) — use --version"
+  info "descobrindo ultimo release de ${REPO}"
+  TAG=$(descobrir_tag) || true
+
+  # Fallback para a API: se o redirect nao resolveu (proxy que nao segue 302,
+  # por exemplo), ainda vale tentar, aceitando o limite de taxa.
+  if [[ -z "${TAG:-}" ]]; then
+    warn "redirect nao resolveu — tentando a API (limitada por IP)"
+    TAG=$(ler "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null \
+          | grep -m1 '"tag_name"' \
+          | sed -E 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/') || true
+  fi
+
+  if [[ -z "${TAG:-}" ]]; then
+    err "nao foi possivel descobrir o ultimo release de ${REPO}."
+    err "causas comuns: nenhum release publicado, sem saida para a internet,"
+    err "ou limite de taxa da API do GitHub (60/hora por IP, sem token)."
+    die "contorne fixando a versao: --version <v>"
+  fi
   VERSAO="${TAG#v}"
 else
   TAG="v${VERSAO#v}"
