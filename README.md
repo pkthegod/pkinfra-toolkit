@@ -33,6 +33,19 @@ curl -fsSL .../bootstrap.sh | sudo bash -s -- --all
 > controlaria os dois arquivos. Integridade de verdade vem de fixar o digest
 > com `--sha256`, e o valor sai das notas de cada release (ou do seu próprio
 > `./build.sh`, que é reproduzível). Em produção, fixe.
+>
+> **E fixe também o `bootstrap.sh`.** A URL com `/main/` serve sempre a
+> versão mais recente do script — conveniente para corrigir o instalador sem
+> republicar release, mas significa que a frota executa como root um arquivo
+> que pode ter mudado desde a última vez. Para produção, aponte para a tag:
+>
+> ```bash
+> curl -fsSL https://raw.githubusercontent.com/pkthegod/pkinfra-toolkit/v2026.07.29/bootstrap.sh \
+>   | sudo bash -s -- --version 2026.07.29 --sha256 <hash>
+> ```
+>
+> Assim as duas metades ficam pinadas: o instalador pela tag, o pacote pelo
+> digest.
 
 ### Manual (tarball do release)
 
