@@ -110,6 +110,94 @@ def test_state_list_respeita_nullglob_previamente_ligado(pk_root):
     assert "MANTIDO" in proc.stdout, proc.stdout
 
 
+def test_biblioteca_sobrevive_a_set_e_do_chamador(pk_root):
+    """pkops.sh e sourceado por scripts de terceiros; `set -e` e comum.
+
+    A versao anterior fazia `shopt -q nullglob; local x=$?` — e `shopt -q`
+    retorna 1 quando a opcao esta desligada, o que sob `set -e` derrubava o
+    script do chamador na primeira chamada a pk_state_list. Falha do tipo
+    mais caro: quem chamou apanha sem entender por que.
+    """
+    (pk_root / "state" / "tuning.env").touch()
+    proc = _roda(
+        "set -e\n"
+        "pk_state_list >/dev/null\n"
+        "pk_sysctl_norm 'a b' >/dev/null\n"
+        "echo CHEGOU_AO_FIM\n",
+        pk_root,
+    )
+    assert "CHEGOU_AO_FIM" in proc.stdout, (
+        f"biblioteca abortou sob set -e (exit={proc.returncode}): {proc.stderr}"
+    )
+
+
+def test_state_list_funciona_com_diretorio_vazio_e_set_e(pk_root):
+    """Diretorio vazio e o caminho onde o glob nao casa — o mais arriscado."""
+    proc = _roda("set -e\npk_state_list\necho FIM\n", pk_root)
+    assert "FIM" in proc.stdout, (
+        f"abortou com state/ vazio sob set -e: {proc.stderr}"
+    )
+    assert proc.stdout.strip() == "FIM", f"imprimiu lixo: {proc.stdout!r}"
+
+
+def test_norm_sysctl_trata_tab_como_espaco(pk_root):
+    """Bug 29 do catalogo: o kernel separa sysctl multivalor com TAB.
+
+    `tr -s ' '` nao converte tab, entao a comparacao declarado x efetivo
+    acusava deriva inexistente em udp_mem, tcp_rmem e ip_local_port_range —
+    o operador reaplicava tuning que ja estava aplicado.
+    """
+    proc = _roda(
+        # valores reais como o kernel os devolve: separados por TAB
+        'com_tab=$(printf "189141\\t252188\\t378282")\n'
+        'com_espaco="189141 252188 378282"\n'
+        'a=$(pk_sysctl_norm "$com_tab")\n'
+        'b=$(pk_sysctl_norm "$com_espaco")\n'
+        'printf "a=[%s]\\nb=[%s]\\n" "$a" "$b"\n',
+        pk_root,
+    )
+    assert proc.returncode == 0, proc.stderr
+    # Compara com o literal esperado, nao apenas a == b: com a funcao ausente
+    # os dois sairiam vazios e o teste passaria sem nada implementado.
+    assert "a=[189141 252188 378282]" in proc.stdout, proc.stdout
+    assert "b=[189141 252188 378282]" in proc.stdout, proc.stdout
+
+
+def test_norm_sysctl_apara_bordas_e_colapsa_repeticao(pk_root):
+    """Borda com espaco e o outro jeito de gerar deriva fantasma."""
+    proc = _roda(
+        'r=$(pk_sysctl_norm "$(printf "  4096\\t\\t87380   6291456  ")")\n'
+        'printf "[%s]\\n" "$r"\n',
+        pk_root,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == "[4096 87380 6291456]", proc.stdout
+
+
+def test_norm_sysctl_existe_como_funcao(pk_root):
+    """Guarda contra teste que passa por ausencia.
+
+    Varios testes deste grupo comparam saidas entre si; com a funcao
+    inexistente todas sairiam vazias e as comparacoes fechariam. Este fixa
+    que a funcao existe de fato.
+    """
+    proc = _roda('declare -F pk_sysctl_norm >/dev/null && echo EXISTE\n', pk_root)
+    assert proc.returncode == 0, proc.stderr
+    assert "EXISTE" in proc.stdout, "pk_sysctl_norm nao esta definida em lib/pkops.sh"
+
+
+def test_norm_sysctl_aceita_valor_vazio(pk_root):
+    """Chave sem valor nao pode explodir sob `set -u`."""
+    proc = _roda(
+        'declare -F pk_sysctl_norm >/dev/null || { echo AUSENTE; exit 0; }\n'
+        'r=$(pk_sysctl_norm ""); printf "[%s]\\n" "$r"\n',
+        pk_root,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "AUSENTE" not in proc.stdout, "pk_sysctl_norm nao esta definida"
+    assert proc.stdout.strip() == "[]", proc.stdout
+
+
 def test_state_set_e_get_fazem_ida_e_volta(pk_root):
     """Contrato basico da camada: o que pk_state_set grava, pk_state_get le."""
     proc = _roda(

@@ -26,9 +26,19 @@ VERSION="$(tr -d ' \t\r\n' < "${RAIZ}/VERSION")"
 [[ -n "$VERSION" ]] || { echo "VERSION vazio" >&2; exit 1; }
 
 PREFIXO="pkinfra-toolkit-${VERSION}"
-# mtime deriva da propria versao (YYYY.MM.DD) — nada de 'agora', senao o
-# build deixa de ser reproduzivel.
-MTIME="${VERSION//./-} 00:00:00Z"
+
+# mtime deriva da propria versao — nada de 'agora', senao o build deixa de ser
+# reproduzivel.
+#
+# So os TRES primeiros componentes formam a data. Isso permite patch no mesmo
+# dia (2026.07.29.1): com `${VERSION//./-}` cru a data viraria "2026-07-29-1",
+# que o tar rejeita, e a unica saida seria inventar uma data futura.
+DATA_VERSAO=$(cut -d. -f1-3 <<<"$VERSION" | tr '.' '-')
+case "$DATA_VERSAO" in
+  [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;;
+  *) echo "VERSION deve comecar em YYYY.MM.DD (veio '${VERSION}')" >&2; exit 1 ;;
+esac
+MTIME="${DATA_VERSAO} 00:00:00Z"
 
 # arquivos que compoem o pacote. bootstrap.sh e build.sh ficam DE FORA:
 # vivem no repo, nao no artefato.

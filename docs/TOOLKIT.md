@@ -289,7 +289,7 @@ histórico auditável de graça (`git log -p manifest.md`).
 ## 5. Catálogo de bugs — lista anti-regressão
 
 **Esta é a seção mais importante do documento.** Cada item foi encontrado e
-corrigido; reintroduzir qualquer um é regressão.
+corrigido; reintroduzir qualquer um é regressão. **29 itens.**
 
 ### 5.1 Falhas silenciosas (as piores)
 
@@ -302,6 +302,7 @@ corrigido; reintroduzir qualquer um é regressão.
 | 5 | Zabbix `ConfigFrequency` (depreciada no 6.4) | o `sed` não casa, você acha que configurou | usar `ProxyConfigFrequency` no 7.0 |
 | 6 | `nf_conntrack_buckets` via sysctl | read-only após carregar o módulo; falha calada | `options nf_conntrack hashsize=N` em `modprobe.d` |
 | 7 | `readonly VAR` na implementação descarta mock do teste | suíte de teste opera nos **arquivos reais** | `VAR="${VAR:-default}"` ou isolar com `unshare -m` |
+| 29 | `tr -s ' '` para normalizar sysctl de multiplos valores | **falso positivo de deriva** em `udp_mem`, `tcp_rmem`, `ip_local_port_range` — o kernel separa com **TAB**, nao espaco | `tr -s '[:space:]' ' '` + trim das bordas |
 
 ### 5.2 Escopo e ordem
 

@@ -12,6 +12,7 @@ Guarda tres invariantes:
 
 import hashlib
 import os
+import re
 import shutil
 import subprocess
 import tarfile
@@ -102,6 +103,49 @@ def test_versao_e_declarada_em_arquivo():
     """A versao mora em VERSION — build, README e CI leem dali, sem duplicar."""
     assert (RAIZ / "VERSION").exists(), "falta o arquivo VERSION"
     assert VERSION, "VERSION esta vazio"
+
+
+def test_readme_declara_a_mesma_versao_do_arquivo_version():
+    """README vai DENTRO do pacote — versao errada ali mente para quem instala.
+
+    A versao aparece no README em varios lugares (linha de instalacao, exemplo
+    manual, comando de verificacao). Esquecer um deles no bump entrega um
+    pacote que se apresenta como outra versao.
+    """
+    readme = (RAIZ / "README.md").read_text(encoding="utf-8")
+    declarada = re.search(r"\*\*Versão do pacote:\*\*\s*([0-9.]+)", readme)
+    assert declarada, "README nao declara 'Versão do pacote:'"
+    assert declarada.group(1) == VERSION, (
+        f"README diz {declarada.group(1)}, VERSION diz {VERSION}"
+    )
+
+    # Checa so a parte voltada a quem INSTALA. A secao de desenvolvimento tem
+    # um exemplo de bump com versao futura ficticia, que e legitimo — incluir
+    # aquele trecho aqui faria o teste acusar o proprio exemplo.
+    corte = readme.find("## Desenvolvimento e release")
+    instalacao = readme[:corte] if corte > 0 else readme
+
+    antigas = {
+        v for v in re.findall(r"\b(2026\.\d{2}\.\d{2}(?:\.\d+)?)\b", instalacao)
+        if v != VERSION
+    }
+    assert not antigas, (
+        f"versoes desatualizadas nas instrucoes de instalacao: {sorted(antigas)}"
+    )
+
+
+def test_version_comeca_com_data_valida():
+    """O build deriva o mtime dos 3 primeiros componentes do VERSION.
+
+    Uma versao que nao comece em YYYY.MM.DD produz data invalida e o tar
+    recusa — falha que aparece so no build, nao no bump.
+    """
+    partes = VERSION.split(".")
+    assert len(partes) >= 3, f"VERSION precisa de ao menos YYYY.MM.DD: {VERSION}"
+    ano, mes, dia = partes[0], partes[1], partes[2]
+    assert len(ano) == 4 and ano.isdigit(), f"ano invalido: {ano}"
+    assert len(mes) == 2 and 1 <= int(mes) <= 12, f"mes invalido: {mes}"
+    assert len(dia) == 2 and 1 <= int(dia) <= 31, f"dia invalido: {dia}"
 
 
 def test_tarball_tem_o_nome_da_versao(artefato):

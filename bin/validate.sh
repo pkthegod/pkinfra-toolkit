@@ -83,6 +83,11 @@ chk() { # <nome> <detalhe-ok> <detalhe-fail> <cmd...>
 hdr() { CUR_MOD="$1"; [[ $JSON -eq 0 ]] && { echo; echo "${C_B}== $1 ==${C_0}"; }; return 0; }
 want() { [[ -z "$ONLY" ]] && return 0; [[ ",$ONLY," == *",$1,"* ]]; }
 
+# Normaliza valor de sysctl para comparacao: TAB e espaco multiplo viram um
+# espaco simples, e as bordas sao aparadas. Sem isso, chave de multiplos
+# valores acusa deriva que nao existe.
+_norm_sysctl() { tr -s '[:space:]' ' ' <<<"${1:-}" | sed 's/^ *//; s/ *$//'; }
+
 svc_active()  { systemctl is-active --quiet "$1" 2>/dev/null; }
 svc_exists()  { systemctl list-unit-files "$1.service" &>/dev/null; }
 nofile_of()   { systemctl show "$1" -p LimitNOFILE --value 2>/dev/null; }
@@ -177,8 +182,10 @@ mod_tuning() {
       key="${line%%=*}"; key="${key// }"; val="${line#*=}"; val="${val# }"
       [[ -e "/proc/sys/${key//.//}" ]] || continue
       cur=$(sysctl -n "$key" 2>/dev/null)
-      # normaliza espacos (tcp_rmem e lista)
-      [[ "$(tr -s ' ' <<<"$cur")" == "$(tr -s ' ' <<<"$val")" ]] || {
+      # O kernel separa sysctl de multiplos valores com TAB, nao espaco.
+      # 'tr -s " "' nao converte tab e gera falso positivo de deriva em
+      # udp_mem, tcp_rmem, ip_local_port_range etc.
+      [[ "$(_norm_sysctl "$cur")" == "$(_norm_sysctl "$val")" ]] || {
         drift=$((drift+1))
         [[ $drift -le 3 ]] && warn_ "deriva: ${key}" "arquivo=${val} efetivo=${cur}"
       }

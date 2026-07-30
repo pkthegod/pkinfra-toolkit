@@ -139,17 +139,20 @@ pk_state_get() { # <componente> [chave]
 }
 
 pk_state_list() {
-    # glob direto em vez de `ls | xargs basename`: nao depende de como o ls
-    # formata nome nenhum, e o nullglob evita devolver o proprio padrao
-    # quando o diretorio esta vazio.
+    # Glob direto em vez de `ls | xargs basename`: nao depende de como o ls
+    # formata nome nenhum e nao parte nome com espaco em dois.
+    #
+    # O teste `-e` cobre o caso do diretorio vazio, em que o glob nao casa e
+    # o bash devolve o proprio padrao. Nao usamos nullglob de proposito:
+    # ligar/desligar opcao de shell dentro de uma biblioteca mexe no
+    # comportamento de quem sourceou, e `shopt -q` retorna 1 quando a opcao
+    # esta desligada — sob `set -e` isso derruba o script do chamador.
     local f n
-    shopt -q nullglob; local tinha_nullglob=$?
-    shopt -s nullglob
     for f in "$PK_STATE"/*.env; do
+        [[ -e "$f" ]] || continue
         n=${f##*/}
         printf '%s\n' "${n%.env}"
     done
-    [[ $tinha_nullglob -eq 0 ]] || shopt -u nullglob
 }
 
 # --- defasagem ---------------------------------------------------------------
@@ -159,6 +162,10 @@ pk_stale() { # <componente> -> 0 se DEFASADO
     local k; k=$(pk_state_get "$1" PK_KERNEL 2>/dev/null) || return 1
     [[ -n "$k" && "$k" != "$(uname -r)" ]]
 }
+
+# Normaliza valor de sysctl para comparacao. O kernel separa chaves de
+# multiplos valores (udp_mem, tcp_rmem, ip_local_port_range) com TAB.
+pk_sysctl_norm() { tr -s '[:space:]' ' ' <<<"${1:-}" | sed 's/^ *//; s/ *$//'; }
 
 pk_facts() {
     mkdir -p "$PK_ROOT" 2>/dev/null
@@ -219,7 +226,8 @@ _drift_sysctl_profile() {
         key="${line%%=*}"; key="${key// }"; val="${line#*=}"; val="${val# }"
         [[ -e "/proc/sys/${key//.//}" ]] || continue
         cur=$(sysctl -n "$key" 2>/dev/null)
-        [[ "$(tr -s ' ' <<<"$cur")" == "$(tr -s ' ' <<<"$val")" ]] || {
+        # kernel usa TAB como separador; 'tr -s " "' nao pega isso
+        [[ "$(pk_sysctl_norm "$cur")" == "$(pk_sysctl_norm "$val")" ]] || {
             echo "WARN|${key}|declarado=${val} efetivo=${cur}"; n=$((n+1)); }
     done < "$pf"
     [[ $n -eq 0 ]] && echo "OK|perfil ${prof}|sem deriva"

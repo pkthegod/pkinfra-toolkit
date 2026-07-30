@@ -2,7 +2,7 @@
 
 Ferramentas de upgrade, tuning e validação para frota Debian / Proxmox VE.
 
-**Versão do pacote:** 2026.07.29
+**Versão do pacote:** 2026.07.29.1
 
 ---
 
@@ -22,7 +22,7 @@ chama o `install.sh` de dentro do pacote. Flags passam direto:
 curl -fsSL .../bootstrap.sh | sudo bash -s -- --dry-run
 
 # versão fixa + digest fixo — é assim que se instala em produção
-curl -fsSL .../bootstrap.sh | sudo bash -s -- --version 2026.07.29 --sha256 <hash>
+curl -fsSL .../bootstrap.sh | sudo bash -s -- --version 2026.07.29.1 --sha256 <hash>
 
 # forçar tudo, independente do papel do host
 curl -fsSL .../bootstrap.sh | sudo bash -s -- --all
@@ -40,8 +40,8 @@ curl -fsSL .../bootstrap.sh | sudo bash -s -- --all
 > que pode ter mudado desde a última vez. Para produção, aponte para a tag:
 >
 > ```bash
-> curl -fsSL https://raw.githubusercontent.com/pkthegod/pkinfra-toolkit/v2026.07.29/bootstrap.sh \
->   | sudo bash -s -- --version 2026.07.29 --sha256 <hash>
+> curl -fsSL https://raw.githubusercontent.com/pkthegod/pkinfra-toolkit/v2026.07.29.1/bootstrap.sh \
+>   | sudo bash -s -- --version 2026.07.29.1 --sha256 <hash>
 > ```
 >
 > Assim as duas metades ficam pinadas: o instalador pela tag, o pacote pelo
@@ -50,7 +50,7 @@ curl -fsSL .../bootstrap.sh | sudo bash -s -- --all
 ### Manual (tarball do release)
 
 ```bash
-V=2026.07.29
+V=2026.07.29.1
 curl -fsSLO https://github.com/pkthegod/pkinfra-toolkit/releases/download/v$V/pkinfra-toolkit-$V.tar.gz
 curl -fsSLO https://github.com/pkthegod/pkinfra-toolkit/releases/download/v$V/pkinfra-toolkit-$V.tar.gz.sha256
 sha256sum -c pkinfra-toolkit-$V.tar.gz.sha256
@@ -215,7 +215,7 @@ manifest, histórico git) e `/etc/pkops/hooks.d`.
 
 ## Antes de modificar
 
-Leia a **seção 5 do `TOOLKIT.md`** — catálogo de 28 bugs encontrados e
+Leia a **seção 5 do `TOOLKIT.md`** — catálogo de 29 bugs encontrados e
 corrigidos. Vários são falhas silenciosas: o script "funciona" e o efeito
 não existe. Reintroduzir qualquer um é regressão.
 
@@ -236,8 +236,8 @@ normalizado para LF. O mesmo commit gera **o mesmo `.tar` byte a byte em
 qualquer host**, e é isso que permite conferir um release contra o código:
 
 ```bash
-git checkout v2026.07.29 && ./build.sh
-# compare dist/pkinfra-toolkit-2026.07.29.tar.sha256 com o publicado no release
+git checkout v2026.07.29.1 && ./build.sh
+# compare dist/pkinfra-toolkit-2026.07.29.1.tar.sha256 com o publicado no release
 ```
 
 O digest do **`.tar.gz`** não atravessa hosts: a saída do gzip varia entre

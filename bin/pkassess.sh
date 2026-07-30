@@ -71,6 +71,9 @@ VIRT=$(systemd-detect-virt 2>/dev/null || echo none)
 PVE_VER=$(pveversion 2>/dev/null | head -1 | grep -oP 'pve-manager/\K[^ /]+')
 PVE_MAJOR=$(cut -d. -f1 <<<"${PVE_VER:-0}")
 
+# Normaliza sysctl para comparacao (kernel usa TAB em multiplos valores)
+_nsy() { tr -s '[:space:]' ' ' <<<"${1:-}" | sed 's/^ *//; s/ *$//'; }
+
 x86_level() {
   local v2=1 v3=1 f
   for f in cx16 lahf_lm popcnt sse4_1 sse4_2 ssse3; do hasf "$f" || v2=0; done
@@ -200,7 +203,8 @@ if [[ -n "$_pf" ]]; then
     _k2="${l%%=*}"; _k2="${_k2// }"; _v="${l#*=}"; _v="${_v# }"
     [[ -e "/proc/sys/${_k2//.//}" ]] || continue
     _c=$(sysctl -n "$_k2" 2>/dev/null)
-    [[ "$(tr -s ' ' <<<"$_c")" == "$(tr -s ' ' <<<"$_v")" ]] || _drift=$((_drift+1))
+    # kernel usa TAB em chave de multiplos valores -> normalizar os dois
+    [[ "$(_nsy "$_c")" == "$(_nsy "$_v")" ]] || _drift=$((_drift+1))
   done < "$_pf"
   [[ $_drift -gt 0 ]] && { TUNE=$((TUNE-20)); TUNE_NOTAS+=("${_drift} chave(s) com deriva do declarado"); }
 else
