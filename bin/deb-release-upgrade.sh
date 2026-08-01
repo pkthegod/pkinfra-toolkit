@@ -44,8 +44,8 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
-C_R=$'\e[31m'; C_G=$'\e[32m'; C_Y=$'\e[33m'; C_B=$'\e[36m'; C_D=$'\e[2m'; C_0=$'\e[0m'
-[[ -t 1 ]] || { C_R=""; C_G=""; C_Y=""; C_B=""; C_D=""; C_0=""; }
+C_R=$'\e[31m'; C_G=$'\e[32m'; C_Y=$'\e[33m'; C_B=$'\e[36m'; C_0=$'\e[0m'
+[[ -t 1 ]] || { C_R=""; C_G=""; C_Y=""; C_B=""; C_0=""; }
 ok()   { printf '  %sOK%s   %s\n' "$C_G" "$C_0" "$*"; }
 warn() { printf '  %s!!%s   %s\n' "$C_Y" "$C_0" "$*"; }
 err()  { printf '  %sXX%s   %s\n' "$C_R" "$C_0" "$*"; }
@@ -137,7 +137,9 @@ resolve_sec() {
 info "resolvendo onde $TO esta hospedado..."
 IFS='|' read -r URL ONDE     <<<"$(resolve "$TO")"
 IFS='|' read -r SURL SONDE   <<<"$(resolve_sec "$TO")"
-IFS='|' read -r CURL CONDE   <<<"$(resolve "$CUR")"
+# do resolve da release ATUAL so interessa onde ela esta (live/archive); a URL
+# vai para `_` porque o read e posicional e o campo precisa ser consumido.
+IFS='|' read -r _ CONDE      <<<"$(resolve "$CUR")"
 
 [[ "$ONDE" == "nenhum" ]] && die "$TO nao encontrado em deb.debian.org nem archive.debian.org"
 ok "$TO -> $URL ($ONDE)"

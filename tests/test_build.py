@@ -266,6 +266,22 @@ def test_indice_git_marca_scripts_como_executaveis():
     Sem ele, o clone no Linux traz 0644 e todo `./build.sh` do CI morre em
     "permission denied". Regride calado; por isso tem teste.
     """
+    # Arquivo novo ainda nao adicionado nao aparece em `git ls-files`, e o
+    # teste passava por vazio justamente no momento em que mais importa: ao
+    # introduzir um script. Falha primeiro se houver .sh solto no indice.
+    novos = subprocess.run(
+        ["git", "ls-files", "--others", "--exclude-standard"],
+        cwd=str(RAIZ), capture_output=True, text=True,
+    )
+    soltos = [
+        c for c in novos.stdout.split()
+        if c.endswith(".sh") and not c.endswith(".example")
+    ]
+    assert not soltos, (
+        f"script(s) fora do controle de versao: {sorted(soltos)} — "
+        "`git add` antes, senao este teste nao os enxerga"
+    )
+
     proc = subprocess.run(
         ["git", "ls-files", "-s"],
         cwd=str(RAIZ),
