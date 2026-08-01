@@ -36,6 +36,7 @@ ESPERADOS = {
     "bin/tune-profile.sh",
     "bin/setup-unbound.sh",
     "bin/validate.sh",
+    "bin/deb-release-upgrade.sh",
     "docs/TOOLKIT.md",
     "docs/RUNBOOK.md",
     "hooks.d/10-jsonl.sh.example",
@@ -289,6 +290,56 @@ def test_indice_git_marca_scripts_como_executaveis():
     assert not sem_bit, (
         "sem bit de execucao no indice: "
         f"{sorted(sem_bit)} — rode: git update-index --chmod=+x <arquivos>"
+    )
+
+
+def _lista_do_shell(texto: str, nome_array: str) -> set:
+    """Extrai os itens de um array bash declarado como NOME=( ... )."""
+    m = re.search(rf"{nome_array}=\((.*?)\)", texto, re.DOTALL)
+    if not m:
+        return set()
+    return {
+        item.strip()
+        for linha in m.group(1).splitlines()
+        for item in linha.split("#")[0].split()
+        if item.strip()
+    }
+
+
+def test_todo_script_de_bin_e_empacotado_e_instalado():
+    """Script novo em bin/ tem de entrar no build, no install e no uninstall.
+
+    E o esquecimento mais facil de cometer: escreve-se a ferramenta, testa-se
+    a mao, e ela nunca chega ao tarball — ou chega e o --uninstall a deixa
+    para tras em /usr/local/sbin depois de desinstalar.
+    """
+    em_bin = {p.name for p in (RAIZ / "bin").glob("*.sh")}
+    assert em_bin, "bin/ vazio"
+
+    build = (RAIZ / "build.sh").read_text(encoding="utf-8")
+    conteudo = _lista_do_shell(build, "CONTEUDO")
+    faltando_build = {n for n in em_bin if f"bin/{n}" not in conteudo}
+    assert not faltando_build, (
+        f"nao entram no tarball (array CONTEUDO do build.sh): {sorted(faltando_build)}"
+    )
+
+    inst = (RAIZ / "install.sh").read_text(encoding="utf-8")
+    # o instalador tem a lista base e a extra de PVE; vale estar em qualquer uma
+    instalados = _lista_do_shell(inst, "INSTALL_LIST")
+    instalados |= set(re.findall(r"INSTALL_LIST\+=\(([^)]*)\)", inst)[0].split()) \
+        if re.findall(r"INSTALL_LIST\+=\(([^)]*)\)", inst) else set()
+    faltando_inst = em_bin - instalados
+    assert not faltando_inst, (
+        f"nao sao instalados pelo install.sh: {sorted(faltando_inst)}"
+    )
+
+    # o laco de desinstalacao e um `for f in a b c; do`
+    m = re.search(r"for f in ([^;]+); do\s*\n\s*\[\[ -e \"\$\{BINDIR\}", inst)
+    assert m, "nao localizei a lista de desinstalacao no install.sh"
+    desinstalados = set(m.group(1).split())
+    faltando_uninst = em_bin - desinstalados
+    assert not faltando_uninst, (
+        f"ficam para tras no --uninstall: {sorted(faltando_uninst)}"
     )
 
 

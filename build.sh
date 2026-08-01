@@ -52,6 +52,7 @@ CONTEUDO=(
   bin/tune-profile.sh
   bin/setup-unbound.sh
   bin/validate.sh
+  bin/deb-release-upgrade.sh
   docs/TOOLKIT.md
   docs/RUNBOOK.md
   hooks.d/10-jsonl.sh.example

@@ -91,10 +91,41 @@ jobs:
           # rodar duas vezes = rodar uma vez
           ./install.sh --all
 
+      - name: deb-release-upgrade.sh nao destroi nada em --dry-run
+        run: |
+          apt-get install -y -qq --no-install-recommends curl
+          cp /etc/apt/sources.list /tmp/sources.list.antes 2>/dev/null || true
+
+          /usr/local/sbin/deb-release-upgrade.sh --help >/dev/null
+          # flag desconhecida tem de sair 2, nao seguir adiante
+          if /usr/local/sbin/deb-release-upgrade.sh --nao-existe 2>/dev/null; then
+            echo "::error::aceitou flag desconhecida"; exit 1
+          fi
+          /usr/local/sbin/deb-release-upgrade.sh --dry-run
+
+          # o contrato do --dry-run: sources.list intocado
+          if [ -f /tmp/sources.list.antes ]; then
+            diff -q /tmp/sources.list.antes /etc/apt/sources.list \
+              || { echo "::error::--dry-run alterou o sources.list"; exit 1; }
+          fi
+          test ! -e /etc/apt/apt.conf.d/99no-check-valid-until \
+            || { echo "::error::--dry-run escreveu apt.conf.d"; exit 1; }
+
+      - name: sem curl, o erro tem de apontar o curl
+        run: |
+          mv /usr/bin/curl /usr/bin/curl.off
+          saida=$(/usr/local/sbin/deb-release-upgrade.sh --dry-run 2>&1 || true)
+          mv /usr/bin/curl.off /usr/bin/curl
+          case "$saida" in
+            *curl*) echo "erro aponta a dependencia real" ;;
+            *) echo "::error::sem curl o erro nao menciona curl: $saida"; exit 1 ;;
+          esac
+
       - name: uninstall preserva estado
         run: |
           V=$(tr -d ' \n\r' < VERSION)
           cd "/tmp/pkinfra-toolkit-${V}"
           ./install.sh --uninstall
           test ! -e /usr/local/sbin/pkassess.sh
+          test ! -e /usr/local/sbin/deb-release-upgrade.sh
           test -d /var/lib/pkops

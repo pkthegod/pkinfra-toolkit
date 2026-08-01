@@ -2,7 +2,7 @@
 
 Ferramentas de upgrade, tuning e validação para frota Debian / Proxmox VE.
 
-**Versão do pacote:** 2026.07.29.1
+**Versão do pacote:** 2026.08.01
 
 ---
 
@@ -22,7 +22,7 @@ chama o `install.sh` de dentro do pacote. Flags passam direto:
 curl -fsSL .../bootstrap.sh | sudo bash -s -- --dry-run
 
 # versão fixa + digest fixo — é assim que se instala em produção
-curl -fsSL .../bootstrap.sh | sudo bash -s -- --version 2026.07.29.1 --sha256 <hash>
+curl -fsSL .../bootstrap.sh | sudo bash -s -- --version 2026.08.01 --sha256 <hash>
 
 # forçar tudo, independente do papel do host
 curl -fsSL .../bootstrap.sh | sudo bash -s -- --all
@@ -40,8 +40,8 @@ curl -fsSL .../bootstrap.sh | sudo bash -s -- --all
 > que pode ter mudado desde a última vez. Para produção, aponte para a tag:
 >
 > ```bash
-> curl -fsSL https://raw.githubusercontent.com/pkthegod/pkinfra-toolkit/v2026.07.29.1/bootstrap.sh \
->   | sudo bash -s -- --version 2026.07.29.1 --sha256 <hash>
+> curl -fsSL https://raw.githubusercontent.com/pkthegod/pkinfra-toolkit/v2026.08.01/bootstrap.sh \
+>   | sudo bash -s -- --version 2026.08.01 --sha256 <hash>
 > ```
 >
 > Assim as duas metades ficam pinadas: o instalador pela tag, o pacote pelo
@@ -50,7 +50,7 @@ curl -fsSL .../bootstrap.sh | sudo bash -s -- --all
 ### Manual (tarball do release)
 
 ```bash
-V=2026.07.29.1
+V=2026.08.01
 curl -fsSLO https://github.com/pkthegod/pkinfra-toolkit/releases/download/v$V/pkinfra-toolkit-$V.tar.gz
 curl -fsSLO https://github.com/pkthegod/pkinfra-toolkit/releases/download/v$V/pkinfra-toolkit-$V.tar.gz.sha256
 sha256sum -c pkinfra-toolkit-$V.tar.gz.sha256
@@ -87,6 +87,7 @@ done
 | `bin/tune-profile.sh` | 1.0 | tuning de guest — 8 perfis de carga |
 | `bin/setup-unbound.sh` | 2.0 | resolvedor recursivo validante |
 | `bin/validate.sh` | 1.0 | validação de runtime + tuning |
+| `bin/deb-release-upgrade.sh` | 1.0 | upgrade de release Debian, **um salto por vez** |
 | `docs/TOOLKIT.md` | — | **referência completa** |
 
 Após instalar, tudo fica em `/usr/local/sbin/` e a referência em
@@ -117,6 +118,25 @@ pve-upgrade.sh --apply
 pve-upgrade.sh --validate
 proxmox_tune.sh
 ```
+
+### Upgrade de release Debian (guest)
+
+```bash
+deb-release-upgrade.sh --dry-run      # mostra host resolvido, repos e riscos
+deb-release-upgrade.sh                # um salto: bullseye -> bookworm
+# reboot
+deb-release-upgrade.sh --to trixie    # próximo salto, depois de validar
+```
+
+Resolve **por sondagem** onde a release está hospedada — release arquivada vive
+em `archive.debian.org`, a próxima em `deb.debian.org`. Um `sed` no codename
+produziria `archive.debian.org/debian bookworm`, que não existe, e o `apt
+update` só falha depois que o `sources.list` já foi mexido. O script sonda,
+faz backup, e reverte sozinho se o `apt update` não passar.
+
+Recusa saltos de mais de uma release (o Debian só suporta N→N+1) e recusa
+rodar em host Proxmox — lá o caminho é o `pve-upgrade.sh`, que trata repos do
+PVE, ceph e a ordem correta.
 
 ### Guest de serviço
 
@@ -236,8 +256,8 @@ normalizado para LF. O mesmo commit gera **o mesmo `.tar` byte a byte em
 qualquer host**, e é isso que permite conferir um release contra o código:
 
 ```bash
-git checkout v2026.07.29.1 && ./build.sh
-# compare dist/pkinfra-toolkit-2026.07.29.1.tar.sha256 com o publicado no release
+git checkout v2026.08.01 && ./build.sh
+# compare dist/pkinfra-toolkit-2026.08.01.tar.sha256 com o publicado no release
 ```
 
 O digest do **`.tar.gz`** não atravessa hosts: a saída do gzip varia entre
