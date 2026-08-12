@@ -240,7 +240,7 @@ DEFEITOS_ATIVOS = [
     ),
     (
         "EDNS truncando em 1232",
-        lambda h: h.caso("dig", "*google.com A*+bufsize*", 0,
+        lambda h: h.caso("dig", "*google.com A*+edns=0*+bufsize*", 0,
                          dig_resposta(flags="qr tc rd ra", answer=_ANS_GOOGLE)),
         "bind.q.edns", "YELLOW",
     ),
