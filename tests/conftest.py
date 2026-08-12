@@ -227,11 +227,23 @@ class HostFalso:
         self._escreve(nome)
 
     def remove_comando(self, nome: str) -> None:
-        """Faz o comando sumir do PATH — simula pacote nao instalado."""
+        """Simula pacote nao instalado.
+
+        APAGAR o stub nao serve: o PATH so comeca pelo diretorio de stubs, e a
+        busca segue para /usr/bin. Num host de desenvolvimento Windows nao ha
+        `timedatectl` nenhum e o teste passava; no runner Linux existe o de
+        verdade, ele respondia, e o caso vinha GREEN onde o teste exigia SKIP.
+        Nessa forma o arnes media a MAQUINA, nao o toolkit.
+
+        Entao o stub fica — sombreando o binario real — e passa a se comportar
+        como comando inexistente: 127 e nada no stdout, que e exatamente o que
+        o bash entrega quando nao acha o executavel. Todo ponto de uso da suite
+        consome saida ou codigo de retorno, entao a simulacao e fiel.
+        """
         self._cmds.pop(nome, None)
         alvo = self.stubs / nome
-        if alvo.exists():
-            alvo.unlink()
+        alvo.write_text("#!/usr/bin/env bash\nexit 127\n", encoding="utf-8", newline="\n")
+        os.chmod(alvo, 0o755)
 
     def _escreve(self, nome: str) -> None:
         casos, padrao = self._cmds[nome]
