@@ -116,7 +116,14 @@ pk_state_set() { # <componente> k=v [k=v...]
         grep -vE "^(PK_APPLIED_AT|PK_KERNEL|PK_TOOL|PK_TOOL_VERSION)=" "$f" > "$tmp" 2>/dev/null
         for kv in "$@"; do
             k="${kv%%=*}"
-            grep -vE "^${k}=" "$tmp" > "${tmp}.n" 2>/dev/null && mv "${tmp}.n" "$tmp"
+            # `grep -v` sai 1 quando NAO sobra nenhuma linha — o caso de o
+            # arquivo ter so a chave que estamos reescrevendo. Encadeado com
+            # `&&`, o mv era pulado justamente ai, o valor antigo continuava no
+            # arquivo e o novo era acrescentado embaixo. Como pk_state_get lia
+            # a primeira ocorrencia, a camada passava a devolver o valor VELHO
+            # a cada regravacao. O status do grep nao decide nada aqui.
+            grep -vE "^${k}=" "$tmp" > "${tmp}.n" 2>/dev/null
+            mv -f "${tmp}.n" "$tmp"
         done
     fi
     for kv in "$@"; do printf '%s\n' "$kv" >> "$tmp"; done
@@ -134,7 +141,10 @@ pk_state_set() { # <componente> k=v [k=v...]
 pk_state_get() { # <componente> [chave]
     local f="${PK_STATE}/${1}.env"
     [[ -f "$f" ]] || return 1
-    if [[ -n "${2:-}" ]]; then grep -oP "^${2}=\K.*" "$f" | head -1
+    # `tail -1`, nao `head -1`: a ultima gravacao e a que vale. Arquivo escrito
+    # pela versao com o bug do mv acima pode ter a mesma chave duas vezes, e
+    # ler a primeira devolveria o valor mais antigo — o oposto do esperado.
+    if [[ -n "${2:-}" ]]; then grep -oP "^${2}=\K.*" "$f" | tail -1
     else cat "$f"; fi
 }
 
@@ -166,6 +176,39 @@ pk_stale() { # <componente> -> 0 se DEFASADO
 # Normaliza valor de sysctl para comparacao. O kernel separa chaves de
 # multiplos valores (udp_mem, tcp_rmem, ip_local_port_range) com TAB.
 pk_sysctl_norm() { tr -s '[:space:]' ' ' <<<"${1:-}" | sed 's/^ *//; s/ *$//'; }
+
+# --- JSON --------------------------------------------------------------------
+# Escapa um valor para dentro de uma string JSON (sem as aspas externas).
+#
+# O toolkit monta JSON com printf, e escapar so a aspa — que era o que os
+# scripts faziam — nao basta. O caso que quebrava de verdade: valor de sysctl
+# multivalor vem do kernel separado por TAB, e TAB cru dentro de string e JSON
+# invalido. O `jq` do `pkops fleet` engolia o arquivo inteiro em silencio e o
+# host sumia do relatorio da frota como se estivesse ok.
+#
+# Trata, nesta ordem: barra invertida (primeiro, senao re-escapa o que os
+# outros produzem), aspa, e os controles com forma curta. O que sobrar abaixo
+# de 0x20 vira \u00XX.
+pk_json_esc() { # <texto> -> texto escapado
+    local s="${1:-}"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    s="${s//$'\t'/\\t}"
+    s="${s//$'\n'/\\n}"
+    s="${s//$'\r'/\\r}"
+    s="${s//$'\f'/\\f}"
+    s="${s//$'\b'/\\b}"
+    if [[ "$s" == *[[:cntrl:]]* ]]; then
+        local out="" i c
+        for (( i=0; i<${#s}; i++ )); do
+            c="${s:i:1}"
+            [[ "$c" == [[:cntrl:]] ]] && printf -v c '\\u%04x' "'$c"
+            out+="$c"
+        done
+        s="$out"
+    fi
+    printf '%s' "$s"
+}
 
 pk_facts() {
     mkdir -p "$PK_ROOT" 2>/dev/null
@@ -349,14 +392,14 @@ cmd_manifest() {
 
     # versao para maquina
     {
-        printf '{"host":"%s","generated":"%s","pkops":"%s","facts":{' \
-            "$(hostname)" "$(date -Is)" "$PKOPS_VERSION"
+        printf '{"schema":%d,"host":"%s","generated":"%s","pkops":"%s","facts":{' \
+            "$PKOPS_SCHEMA" "$(pk_json_esc "$(hostname)")" "$(date -Is)" "$PKOPS_VERSION"
         local first=1
         while IFS='=' read -r k v; do
             [[ "$k" =~ ^FACT_ ]] || continue
             v="${v%\"}"; v="${v#\"}"          # tira as aspas do arquivo
             [[ $first -eq 0 ]] && printf ','; first=0
-            printf '"%s":"%s"' "${k#FACT_}" "${v//\"/\\\"}"
+            printf '"%s":"%s"' "${k#FACT_}" "$(pk_json_esc "$v")"
         done < "$PK_FACTS"
         printf '},"components":{'
         first=1
@@ -364,8 +407,9 @@ cmd_manifest() {
             [[ $first -eq 0 ]] && printf ','; first=0
             pk_stale "$c" && v=true || v=false
             printf '"%s":{"applied_at":"%s","kernel":"%s","tool":"%s","stale":%s}' \
-                "$c" "$(pk_state_get "$c" PK_APPLIED_AT)" "$(pk_state_get "$c" PK_KERNEL)" \
-                "$(pk_state_get "$c" PK_TOOL)" "$v"
+                "$(pk_json_esc "$c")" "$(pk_json_esc "$(pk_state_get "$c" PK_APPLIED_AT)")" \
+                "$(pk_json_esc "$(pk_state_get "$c" PK_KERNEL)")" \
+                "$(pk_json_esc "$(pk_state_get "$c" PK_TOOL)")" "$v"
         done
         printf '}}\n'
     } > "$PK_MANIFEST_JSON"
