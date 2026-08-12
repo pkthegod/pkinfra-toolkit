@@ -60,7 +60,7 @@ O instalador detecta o papel sozinho. **Mesmo tar, resultado diferente:**
 |---|---|---|
 | `pkops` | sim | sim |
 | `pkassess.sh` | sim | sim |
-| `validate.sh` | sim | sim |
+| `validate.sh` (v2, `--deep`) | sim | sim |
 | `tune-profile.sh` | sim | sim |
 | `setup-unbound.sh` | sim | sim |
 | `pve-upgrade.sh` | **sim** | não |
@@ -274,16 +274,28 @@ systemctl restart <serviço>
 **Sem isso o `LimitNOFILE` não vale.** Drop-in de systemd só aplica no
 próximo start do processo.
 
-### 3.4 Validar
+### 3.4 Validar e testar
 
 ```bash
-validate.sh
+validate.sh --deep
+```
+
+A camada `--deep` é a que importa aqui: ela pergunta ao serviço em vez de
+perguntar ao systemd. Se o host serve DNS, ela cobra resposta recursiva
+real, TCP, EDNS, flag `AD`, `SERVFAIL` em domínio quebrado, AXFR recusado e
+serial servido igual ao do arquivo de zona.
+
+Se algum RED aparecer, cada linha já vem com **esperado**, **obtido** e a
+correção. Para levar o resultado adiante:
+
+```bash
+validate.sh --deep --report > /root/laudo-$(hostname)-$(date +%F).md
 ```
 
 - [ ] VM subiu, steal comparado
 - [ ] Perfil aplicado e conferido
 - [ ] Serviços reiniciados
-- [ ] `validate.sh` sem FAIL
+- [ ] `validate.sh --deep` sem RED (veredito **OK**)
 
 ---
 
@@ -320,12 +332,18 @@ A partir daqui, toda mudança de estado vira commit.
 ```cron
 0 6 * * *    /usr/local/sbin/pkops manifest && /usr/local/sbin/pkops drift
 0 7 * * 1    /usr/local/sbin/pkassess.sh --json > /var/lib/pkops/last-assess.json
+# passiva: só lê estado, pode rodar de 15 em 15 min sem custo
 */15 * * * * /usr/local/sbin/validate.sh --quiet --json > /var/lib/pkops/last-validate.json
+# ativa: consulta o serviço de verdade — 1x por hora basta
+23 * * * *   /usr/local/sbin/validate.sh --deep --json > /var/lib/pkops/last-deep.json
 ```
+
+O exit code é o gatilho: `0` tudo GREEN, `1` há YELLOW, `2` há RED. Em
+Zabbix, o item lê o JSON e a trigger olha `.summary.fail`.
 
 - [ ] JSON do depois salvo e comparado
 - [ ] Hook de git ativo
-- [ ] Cron configurado
+- [ ] Cron configurado (passiva frequente + ativa horária)
 
 ---
 
