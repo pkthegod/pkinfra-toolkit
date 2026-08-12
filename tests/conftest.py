@@ -480,7 +480,10 @@ def _base_bind(h: HostFalso) -> None:
         [
             # ordem importa: as variantes de transporte vem antes da consulta base
             ("*google.com A*+tcp*", 0, dig_resposta(answer=ans_a)),
-            ("*google.com A*+bufsize*", 0, dig_resposta(answer=ans_a)),
+            # `+edns=0` no padrao de proposito: casar so em `+bufsize` deixava
+            # o stub responder identico com ou sem EDNS na consulta, e o teste
+            # do caso ficava cego para o unico detalhe que ele precisa provar.
+            ("*google.com A*+edns=0*+bufsize*", 0, dig_resposta(answer=ans_a)),
             (f"*google.com A*{SIMPLES}", 0, dig_resposta(answer=ans_a)),
             ("*invalid A*", 0, dig_resposta(status="NXDOMAIN", flags="qr rd ra")),
             ("*iana.org A*+dnssec*", 0,

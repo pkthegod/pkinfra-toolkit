@@ -703,7 +703,13 @@ mod_bind() {
 
   # EDNS com bufsize 1232: o valor que a comunidade adotou por causa de MTU.
   # Truncar aqui obriga fallback para TCP em toda resposta assinada.
-  r=$(_dig 127.0.0.1 google.com A +bufsize=1232 +noedns=0)
+  #
+  # `+edns=0`, nao `+noedns=0`: `+noedns` LIMPA a versao de EDNS, e o bufsize
+  # so e anunciado dentro do OPT do EDNS0. Com a forma antiga a consulta saia
+  # sem EDNS nenhum, o +bufsize=1232 era inerte e o caso media outra coisa —
+  # justamente o middlebox que remove EDNS, o alvo declarado aqui, passava
+  # despercebido.
+  r=$(_dig 127.0.0.1 google.com A +edns=0 +bufsize=1232)
   if _dig_tem_flag "$r" tc; then
     amarelo "bind.q.edns" "EDNS bufsize 1232" "sem truncamento" "resposta truncada (flag tc)" \
       "cada consulta paga um round-trip extra em TCP; reveja edns-udp-size"
