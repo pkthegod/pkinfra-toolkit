@@ -235,9 +235,21 @@ jobs:
       # Sem este passo, um bug que fizesse tudo virar GREEN passaria batido.
       - name: config insegura acende RED no bind real
         run: |
-          sudo sed -i 's/allow-recursion { 127.0.0.0\/8; };/allow-recursion { any; };/; \
-                       s/allow-transfer { none; };/allow-transfer { any; };/' \
+          # Um -e por substituicao, com a barra de continuacao FORA das aspas:
+          # dentro delas ela e literal, e o sed recebia '\' seguido de quebra
+          # de linha — que para ele abre endereco com delimitador customizado
+          # (\%re%), nao continuacao. Delimitador '|' para nao escapar a barra
+          # de 127.0.0.0/8.
+          sudo sed -i \
+            -e 's|allow-recursion { 127.0.0.0/8; };|allow-recursion { any; };|' \
+            -e 's|allow-transfer { none; };|allow-transfer { any; };|' \
             /etc/bind/named.conf.options
+          # sed nao reclama quando o padrao nao casa: sem esta conferencia, uma
+          # mudanca no heredoc acima faria o passo testar a config ANTIGA e
+          # acusar validate.sh por um RED que nunca foi pedido.
+          grep -q 'allow-recursion { any; };' /etc/bind/named.conf.options \
+            && grep -q 'allow-transfer { any; };' /etc/bind/named.conf.options \
+            || { echo "::error::o sed nao abriu a config — padrao nao casou"; exit 1; }
           sudo systemctl reload named || sudo systemctl reload bind9
           sleep 2
           sudo ./bin/validate.sh --only bind --json > /tmp/aberto.json || true
