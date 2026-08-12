@@ -86,7 +86,7 @@ done
 | `bin/proxmox_tune.sh` | 3.1.0 | tuning do host PVE |
 | `bin/tune-profile.sh` | 1.0 | tuning de guest — 8 perfis de carga |
 | `bin/setup-unbound.sh` | 2.0 | resolvedor recursivo validante |
-| `bin/validate.sh` | 1.0 | validação de runtime + tuning |
+| `bin/validate.sh` | 2.0 | **valida e testa** o runtime — RED/GREEN, `--deep`, `--json`, `--report` |
 | `bin/deb-release-upgrade.sh` | 1.0 | upgrade de release Debian, **um salto por vez** |
 | `docs/TOOLKIT.md` | — | **referência completa** |
 
@@ -146,7 +146,45 @@ tune-profile.sh --detect           # adivinha pelo que está instalado
 tune-profile.sh --profile <p> --dry-run
 tune-profile.sh --profile <p>
 systemctl restart <serviço>        # limites só valem no restart
-validate.sh
+validate.sh --deep                 # exercita o serviço, não só o processo
+```
+
+### Validar e testar
+
+`validate.sh` tem duas camadas. A **passiva** (padrão) só lê estado — é
+segura em cron de 5 minutos. A **ativa** (`--deep`) exercita o serviço de
+verdade: consulta o resolvedor, força TCP, força EDNS, tenta AXFR não
+autorizado, confere se o serial servido bate com o do arquivo de zona.
+
+```bash
+validate.sh                        # passiva
+validate.sh --deep --only bind     # ativa, só DNS
+validate.sh --deep --strict        # gate: nem ressalva passa
+validate.sh --list                 # módulos disponíveis
+```
+
+Baliza **RED/GREEN**, com exit code para plugar em cron e Zabbix:
+
+| | significado | exit |
+|---|---|---|
+| `GREEN` | passou | `0` |
+| `YELLOW` | divergiu, não derruba agora | `1` |
+| `RED` | falhou, precisa de ação | `2` |
+| `SKIP` | não se aplica a este host | — |
+
+### Exportar e montar relatório
+
+```bash
+validate.sh --deep --report > laudo-$(hostname)-$(date +%F).md   # markdown pronto
+validate.sh --deep --json  > /tmp/host.json                      # schema 2
+```
+
+O JSON traz, por caso, o **id estável**, o valor esperado, o obtido e a
+correção — dá para montar o laudo do jeito que você quiser:
+
+```bash
+jq -r 'if .verdict=="OK" then "ok" else "nok" end' /tmp/host.json
+jq -r '.checks[] | select(.status=="RED") | "\(.id): esperado \(.expected), veio \(.actual) -> \(.fix)"' /tmp/host.json
 ```
 
 ### Gestão
@@ -157,7 +195,7 @@ pkops drift                        # declarado × real
 pkops timeline                     # histórico de eventos
 
 for h in $(cat hosts.txt); do
-  ssh "$h" 'validate.sh --json' > /tmp/frota/$h.json
+  ssh "$h" 'validate.sh --deep --json' > /tmp/frota/$h.json
 done
 pkops fleet /tmp/frota/*.json
 ```

@@ -37,7 +37,7 @@ janelas curtas. Tudo precisa ser idempotente e reversível.
 | `proxmox_tune.sh` | 3.1.0 | Tuning do host PVE | Host PVE |
 | `tune-profile.sh` | 1.0 | Tuning de guest por perfil de carga | VM/LXC/bare-metal |
 | `setup-unbound.sh` | 2.0 | Resolvedor recursivo validante | VM DNS |
-| `validate.sh` | 1.0 | Validação de runtime + tuning | Todos |
+| `validate.sh` | 2.0 | Validação **e teste** de runtime (`--deep`, `--json`, `--report`) | Todos |
 
 Scripts do operador auditados nesta sessão, **não** reescritos (correções
 descritas na seção 5): `system_config.sh` v4.0.0, `setup-bind-recursivo.sh`,
@@ -159,20 +159,117 @@ Oito perfis **mutuamente exclusivos**. Aplicar um remove o outro.
 `ip_forward` é `0` no `proxy` (VM de serviço não é roteador) e `1` no
 `docker` (bridge não roteia sem ele). São contraditórios por natureza.
 
-### 2.4 `validate.sh` — validação de runtime
+### 2.4 `validate.sh` — validação e teste de runtime (v2)
 
 Sete módulos auto-detectados: `core`, `tuning`, `bind`, `unbound`,
 `zabbix-proxy`, `docker`, `pve`.
 
-Saída humana ou `--json`. **Códigos de saída semânticos:** `0` ok,
-`1` warn, `2` fail — plugga direto em Zabbix e cron.
+**Duas camadas na mesma ferramenta:**
+
+| camada | flag | o que faz | custo |
+|---|---|---|---|
+| passiva | *(padrão)* | lê estado; não toca em serviço, não gera tráfego | segura em cron de 5 min |
+| ativa | `--deep` | **exercita** o serviço: consulta o resolvedor, força TCP, força EDNS, tenta AXFR não autorizado, mede latência | segundos, gera tráfego |
+
+A separação existe porque "o processo está de pé" e "o serviço responde
+certo" são perguntas diferentes. O `named` sobe feliz servindo zona velha,
+sem TCP, sem validar DNSSEC e com AXFR liberado para o mundo — e nenhum
+check de `is-active` enxerga nada disso.
+
+**Baliza RED/GREEN.** Cada caso tem um **id estável** (`bind.q.tcp`,
+`core.disco`), um valor **esperado**, o valor **obtido** e a **correção**.
+
+| situação | significado | exit |
+|---|---|---|
+| `GREEN` | passou | `0` |
+| `YELLOW` | divergiu, não derruba agora | `1` |
+| `RED` | falhou, alguém precisa agir | `2` |
+| `SKIP` | não se aplica a este host | — |
+
+`--strict` promove `YELLOW` a falha — é o gate de janela de manutenção.
+
+**Saídas:**
+
+```bash
+validate.sh                          # humano, RED/GREEN colorido
+validate.sh --deep --json | jq .     # schema 2, para máquina
+validate.sh --deep --report          # markdown com veredito OK / NÃO OK
+validate.sh --skip pve,docker        # exclusão dura (vence --only)
+validate.sh --list                   # módulos aceitos por --only/--skip
+```
 
 ```
 UserParameter=host.validate,/usr/local/sbin/validate.sh --json
 ```
 
+#### Schema 2 do `--json`
+
+```jsonc
+{
+  "schema": 2, "tool": "validate", "version": "2.0",
+  "host": "...", "ts": "...", "deep": true, "strict": false,
+  "verdict": "OK" | "ATENCAO" | "FALHA",
+  "exit": 0,
+  "summary": {                       // ok/warn/fail são do schema 1 e ficam
+    "ok": 40, "warn": 0, "fail": 0, "skip": 4, "total": 44,
+    "green": 40, "yellow": 0, "red": 0
+  },
+  "suites": { "bind": {"status":"GREEN","green":28,"red":0,"yellow":0,"skip":0} },
+  "checks": [{
+    "id": "bind.q.axfr",             // id estável — é o contrato
+    "module": "bind", "suite": "bind",
+    "status": "GREEN",               // RED/GREEN/YELLOW/SKIP
+    "severity": "OK",                // OK/WARN/FAIL/SKIP — schema 1
+    "name": "AXFR nao autorizado",
+    "expected": "recusado para exemplo.local",
+    "actual":   "recusado para exemplo.local",
+    "detail":   "...",               // "esperado X, obtido Y" quando acende
+    "fix":      "...",               // vazio em GREEN/SKIP
+    "ms": 12
+  }]
+}
+```
+
+`summary.ok/warn/fail` e `checks[].module/severity/name` são **do schema 1
+e não mudam**: `pkops fleet` e os itens de Zabbix já instalados leem essas
+chaves. Renomear qualquer uma quebra painel de terceiro em silêncio.
+
+Para montar relatório próprio a partir do JSON:
+
+```bash
+validate.sh --deep --json > /tmp/h.json
+jq -r '.checks[] | select(.status=="RED") | "\(.id)\t\(.expected)\t\(.actual)\t\(.fix)"' /tmp/h.json
+jq -r 'if .verdict=="OK" then "ok" else "nok" end' /tmp/h.json
+```
+
+#### O que a camada `--deep` testa em DNS
+
+O módulo `bind` é o mais profundo do toolkit — 28 casos. Os ativos:
+
+| id | o que prova |
+|---|---|
+| `bind.q.recursiva` | `NOERROR` **com resposta**; `dig` sai 0 até com resposta vazia |
+| `bind.q.nxdomain` | nome inexistente dá `NXDOMAIN` — `NOERROR` aqui é sequestro por forwarder do provedor |
+| `bind.q.tcp` | 53/tcp responde; firewall que só libera udp passa em todo teste rápido e quebra resposta grande |
+| `bind.q.edns` | `+bufsize=1232` sem truncar; truncar custa um round-trip por consulta |
+| `bind.q.dnssec.positivo` | `iana.org` volta com flag `AD` |
+| `bind.q.dnssec.negativo` | `dnssec-failed.org` dá `SERVFAIL`; `NOERROR` = validação desligada |
+| `bind.q.cache` | 2ª consulta com TTL menor — prova que há cache |
+| `bind.q.latencia` | resposta de cache dentro do orçamento (`LAT_BUDGET_MS`, 50 ms) |
+| `bind.q.axfr` | AXFR de origem não autorizada é **recusado** |
+| `bind.q.serial` | serial servido == serial do arquivo — pega zona editada sem `rndc reload` |
+| `bind.q.autoritativa` | flag `AA` na própria zona |
+| `bind.q.version.chaos` | `version.bind CH TXT` não revela a versão |
+
+E os passivos de postura: `allow-recursion` restrito, `allow-transfer`
+declarado, `dnssec-validation`, `max-cache-size` com teto, root hints,
+`named-checkconf -z`, `named-checkzone` por zona, canal `rndc`, 53/tcp e
+53/udp escutando, `LimitNOFILE`.
+
 O módulo `tuning` detecta **deriva**: lê o arquivo do perfil aplicado e
-compara chave a chave com o valor efetivo no kernel.
+compara chave a chave com o valor efetivo no kernel, normalizando TAB —
+o kernel separa chave multivalor com TAB e a comparação crua acusa deriva
+que não existe.
 
 ---
 
@@ -262,23 +359,39 @@ reboot
 ./tune-profile.sh --profile <perfil> --dry-run
 ./tune-profile.sh --profile <perfil>
 systemctl restart <serviço>          # limites só valem no restart
-./validate.sh
+./validate.sh --deep                 # exercita o serviço, não só o processo
 ```
 
 ### 4.3 Gestão de frota
 
 ```bash
 for h in $(cat hosts.txt); do
-  ssh "$h" 'validate.sh --json' > /tmp/frota/$h.json
+  ssh "$h" 'validate.sh --deep --json' > /tmp/frota/$h.json
 done
 pkops fleet /tmp/frota/*.json
 ```
 
-### 4.4 Cron recomendado
+### 4.4 Aceite de serviço e laudo
+
+Depois de instalar ou mexer num serviço, o teste ativo é o que fecha:
+
+```bash
+validate.sh --deep --only bind --strict     # gate: nenhuma ressalva passa
+validate.sh --deep --report > laudo-$(hostname)-$(date +%F).md
+```
+
+O relatório traz veredito (**OK** / **NÃO OK**), placar, tabela por módulo,
+a lista de RED com esperado/obtido/**o que fazer**, e o apêndice com todos
+os casos.
+
+### 4.5 Cron recomendado
 
 ```cron
 0 6 * * *  /usr/local/sbin/pkops manifest && /usr/local/sbin/pkops drift
+# passiva, de 10 em 10 min: não gera tráfego, seguro nessa frequência
 */10 * * * * /usr/local/sbin/validate.sh --quiet --json > /var/lib/pkops/last-validate.json
+# ativa, 1x por hora: consulta o resolvedor de verdade
+17 * * * * /usr/local/sbin/validate.sh --deep --json > /var/lib/pkops/last-deep.json
 ```
 
 Com o hook `30-git.sh` ativo, cada mudança de estado vira commit —
@@ -416,25 +529,103 @@ Crie uma função com prefixo `_drift_` em `pkops.sh` que imprima linhas
 `SEV|nome|detalhe`. O motor descobre sozinho via `declare -F`. Sem registro
 manual, sem lista para manter em sincronia.
 
-### 8.4 Ao adicionar um módulo ao `validate.sh`
+### 8.4 Ao adicionar um caso ao `validate.sh`
 
-Função `mod_<nome>`, `hdr <nome>` no início, `ok_`/`warn_`/`fail_`/`skip_`
-para cada verificação, e uma linha `want <nome> && mod_<nome>` no `main`.
-**Sempre** `skip_` quando o serviço não existe — módulo ausente não é falha.
-
-### 8.5 Sempre teste antes de entregar
-
-O padrão usado nesta sessão:
+Função `mod_<nome>`, `hdr <nome>` no início, uma linha
+`want <nome> && mod_<nome>` no `main`, e para cada verificação um destes:
 
 ```bash
-bash -n script.sh                    # sintaxe
-# executar a lógica isolada com valores reais e comparar
+afere      <id> <titulo> <esperado> <obtido> [correcao] [WARN]
+afere_min  <id> <titulo> <minimo>   <valor>  [correcao] [WARN]
+afere_max  <id> <titulo> <maximo>   <valor>  [correcao] [WARN]
+verde      <id> <titulo> <obtido>
+vermelho   <id> <titulo> <esperado> <obtido> [correcao]
+amarelo    <id> <titulo> <esperado> <obtido> [correcao]
+pulado     <id> <titulo> <motivo>
+```
+
+`afere` é o motor: **toda** decisão de severidade passa por ele, então
+testar um caso vira testar um par de strings. Regras:
+
+1. **`pulado`, sempre**, quando o serviço não existe — módulo ausente não é
+   falha. E `pulado` também quando faltou o dado para medir: um caso que
+   simplesmente **some** do relatório é lido como "está tudo bem".
+2. **Todo `vermelho`/`amarelo` traz a correção.** RED sem "o que fazer"
+   transfere o problema em vez de resolver — há teste que reprova isso.
+3. **O id é contrato.** Ele vai para o JSON, para o relatório e para o
+   filtro do painel do operador. Renomear é quebra de API.
+4. **Valor vazio nunca é GREEN.** `afere_min` trata não numérico como falha
+   de propósito: era assim que "`LimitNOFILE` não definido" passava por
+   configurado.
+
+E então **o teste**, que não é opcional: `tests/test_cobertura.py` reprova
+qualquer caso novo que possa acender sem um defeito declarado na matriz do
+módulo. A mensagem de erro traz o id. Ver §8.5.
+
+### 8.5 A suíte de testes — matriz RED/GREEN
+
+```bash
+python -m pytest tests/ -q            # tudo
+python -m pytest tests/ -q -n auto    # em paralelo (pytest-xdist), ~4x
+python -m pytest tests/test_validate_bind.py -q
+```
+
+**Host sintético, não mock.** `tests/conftest.py` monta um sysroot com os
+arquivos que a suíte lê (`PK_SYSROOT`) e um diretório de stubs no início do
+`PATH` com os comandos que ela executa (`systemctl`, `dig`, `ss`, `sysctl`,
+`named-checkconf`, `rndc`, …). O `validate.sh` de verdade roda contra isso —
+sem root, sem Debian, sem bind instalado.
+
+É o que torna a matriz possível:
+
+```python
+DEFEITOS_PASSIVOS = [
+    ("53/tcp sem socket",
+     lambda h: h.caso("ss", "-lnt", 0, "State Recv-Q Send-Q Local Address:Port\n"),
+     "bind.porta.tcp", "RED"),
+    ...
+]
+```
+
+Cada linha injeta **um** defeito e o teste exige três coisas:
+
+1. o caso alvo muda para a cor certa;
+2. **nenhum outro caso muda de cor** — checagem acoplada faz o operador
+   perseguir sintoma em vez de causa;
+3. o exit code acompanha (`0`/`1`/`2`).
+
+Efeito secundário legítimo existe — sem carregar a zona não há serial para
+comparar — e então é **declarado** no 5º campo do defeito. O que é proibido
+é o efeito **não** declarado.
+
+**O fecho: `tests/test_cobertura.py`.** Extrai todo id emitido por
+`validate.sh` e reprova qualquer um que possa acender sem defeito na
+matriz. Acrescentar uma checagem sem o teste correspondente quebra o CI na
+hora, com o id na mensagem. Ids montados em laço (`pve.servico.${s}`) são
+conferidos por prefixo.
+
+| arquivo | o que cobre |
+|---|---|
+| `test_validate_bind.py` | matriz do bind (passiva + ativa) |
+| `test_validate_core.py` | matriz de core e tuning |
+| `test_validate_servicos.py` | unbound, docker, zabbix-proxy, pve |
+| `test_validate_contrato.py` | CLI, exit codes, schema do JSON, relatório |
+| `test_cobertura.py` | nenhum caso sem teste de falha |
+| `test_pkops.py` | biblioteca, eventos, hooks, CLI |
+| `test_build.py` | tarball reprodutível, checksums, LF, `bash -n` |
+
+E, antes de qualquer entrega:
+
+```bash
+bash -n script.sh                    # sintaxe (já coberto em test_build.py)
 # idempotência: rodar 2x e conferir que o resultado é idêntico
-# tabela de cenários: mostrar que os casos divergem como esperado
 ```
 
 Foi assim que apareceram os bugs 2, 3, 7 e 19 — nenhum deles é visível
-lendo o código.
+lendo o código. E foi a matriz que achou o bug do `pk_state_set`: o `mv`
+encadeado com `&&` era pulado quando o `grep -v` não deixava nenhuma linha,
+e a camada de estado passava a devolver o valor **antigo** a cada
+regravação.
 
 ### 8.6 Método de trabalho
 
@@ -477,6 +668,26 @@ antes do deploy, com mock, sem host real. Validação roda depois, no host
 real. Misturar leva alguém a rodar a suíte de mock em produção — e o bug 7
 mostra que isso escreve nos arquivos de verdade.
 
+**Por que o teste ativo entra, atrás de uma flag.** "O processo está de pé"
+e "o serviço responde certo" são perguntas diferentes, e só a segunda
+importa para o usuário. Mas exercitar o serviço gera tráfego e leva
+segundos: em cron de 5 minutos isso vira carga, e num incidente vira ruído.
+Daí `--deep` ser opt-in em vez de ferramenta separada — dois binários
+fariam o operador escolher qual rodar, e a escolha errada é justamente a de
+quem está com pressa.
+
+**Por que `--json` e `--report` não saem juntos.** Os dois escrevem no
+stdout. Aceitar as duas flags entregaria um arquivo com markdown e JSON
+grudados — que não serve para máquina nem para gente, e só é descoberto
+quando o agregador engole em silêncio.
+
+**Por que `PK_SYSROOT` existe num script de produção.** Sem ele, provar que
+uma checagem detecta o defeito que promete exigiria um Debian com bind,
+unbound e Proxmox instalados — ou seja, não seria provado. O custo é um
+prefixo em cada leitura de arquivo; o retorno é a matriz RED/GREEN inteira
+rodando em qualquer máquina, sem root. Comando externo não precisou de
+nada: o `PATH` já resolve isso.
+
 **Por que `pkops` é um arquivo com dupla natureza.** Deploy por `scp` numa
 frota heterogênea. Biblioteca separada do CLI dobraria o custo de
 distribuição sem ganho proporcional.
@@ -509,9 +720,14 @@ pkops hooks example               # cria os 4 callbacks de exemplo
 ./tune-profile.sh --profile docker
 
 # Validação
-./validate.sh
+./validate.sh                        # passiva: lê estado, não gera tráfego
+./validate.sh --deep                 # + camada ativa: exercita o serviço
 ./validate.sh --only unbound,tuning
-./validate.sh --json | jq '.checks[] | select(.severity=="FAIL")'
+./validate.sh --skip pve,docker --strict
+./validate.sh --list                 # módulos aceitos por --only/--skip
+./validate.sh --deep --report > laudo.md
+./validate.sh --deep --json | jq '.checks[] | select(.status=="RED")'
+./validate.sh --json | jq -r 'if .verdict=="OK" then "ok" else "nok" end'
 
 # DNS
 ./setup-unbound.sh --check
