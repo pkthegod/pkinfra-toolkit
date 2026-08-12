@@ -13,14 +13,14 @@ Guarda tres invariantes:
 import hashlib
 import os
 import re
-import shutil
 import subprocess
 import tarfile
 from pathlib import Path
 
 import pytest
 
-RAIZ = Path(__file__).resolve().parent.parent
+from conftest import RAIZ, bash as _bash, posix as _posix, roda_bash
+
 BUILD = RAIZ / "build.sh"
 VERSION = (RAIZ / "VERSION").read_text(encoding="utf-8").strip() if (RAIZ / "VERSION").exists() else None
 
@@ -49,42 +49,8 @@ ESPERADOS = {
 FORA_DO_PACOTE = {"bootstrap.sh", "build.sh"}
 
 
-def _bash():
-    """Localiza um bash que entenda os caminhos desta plataforma.
-
-    No Windows, `which('bash')` costuma achar o bash do WSL em System32 —
-    ele nao resolve `C:/...`, so `/mnt/c/...`. O Git Bash resolve os dois,
-    entao ele vem primeiro.
-    """
-    if os.name == "nt":
-        for git_bash in (
-            r"C:\Program Files\Git\bin\bash.exe",
-            r"C:\Program Files (x86)\Git\bin\bash.exe",
-        ):
-            if Path(git_bash).exists():
-                return git_bash
-
-    achado = shutil.which("bash")
-    if achado and "System32" not in achado:
-        return achado
-    if Path("/usr/bin/bash").exists():
-        return "/usr/bin/bash"
-
-    pytest.skip("bash utilizavel indisponivel (WSL bash nao serve no Windows)")
-
-
-def _posix(p) -> str:
-    """git-bash no Windows engole a barra invertida — passe sempre POSIX."""
-    return Path(p).as_posix()
-
-
 def _build(outdir):
-    return subprocess.run(
-        [_bash(), _posix(BUILD), "--outdir", _posix(outdir)],
-        cwd=str(RAIZ),
-        capture_output=True,
-        text=True,
-    )
+    return roda_bash([_bash(), _posix(BUILD), "--outdir", _posix(outdir)])
 
 
 @pytest.fixture(scope="module")
@@ -367,3 +333,32 @@ def test_bootstrap_existe_e_e_o_alvo_do_curl():
     assert "\r\n" not in texto, "bootstrap.sh com CRLF"
     assert "sha256sum" in texto, "bootstrap baixa e executa sem verificar integridade"
     assert "EUID" in texto or "id -u" in texto, "bootstrap nao checa root"
+
+
+# =============================================================================
+# sintaxe: um erro aqui so aparece na frota
+# =============================================================================
+@pytest.mark.parametrize(
+    "script",
+    sorted(
+        [p.relative_to(RAIZ).as_posix() for p in (RAIZ / "bin").glob("*.sh")]
+        + [p.relative_to(RAIZ).as_posix() for p in (RAIZ / "lib").glob("*.sh")]
+        + ["build.sh", "install.sh", "bootstrap.sh"]
+    ),
+)
+def test_todo_script_passa_no_parser_do_bash(script):
+    """`bash -n` em tudo que e entregue.
+
+    Erro de sintaxe em um ramo raro (um `case` dentro de `$( )`, uma aspa
+    esquecida numa mensagem) nao aparece em teste de comportamento: aparece
+    como script que morre na primeira execucao, no host do cliente.
+    """
+    proc = roda_bash([_bash(), "-n", _posix(RAIZ / script)])
+    assert proc.returncode == 0, f"{script} nao passa em bash -n:\n{proc.stderr}"
+
+
+def test_validate_declara_versao_e_schema_dois():
+    """A v2 mudou o schema do JSON; a versao anunciada tem de acompanhar."""
+    texto = (RAIZ / "bin" / "validate.sh").read_text(encoding="utf-8")
+    assert re.search(r'\bVERSION="2\.\d+"', texto), "validate.sh nao anuncia v2"
+    assert re.search(r"\bSCHEMA=2\b", texto), "validate.sh nao anuncia schema 2"
