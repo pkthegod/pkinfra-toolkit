@@ -229,7 +229,15 @@ jobs:
               exit 1
             }
           done
-          echo "veredito: $(jq -r .verdict /tmp/real.json)"
+          # O veredito global aqui costuma ser FALHA e o job passa mesmo assim:
+          # os casos de fora da lista dependem da internet do runner (recursao
+          # ate a raiz, DNSSEC de terceiro). Imprimir quem acendeu evita que
+          # isso pareca contradicao — e mostra na hora se a lista de exclusao
+          # cresceu sozinha.
+          echo "veredito: $(jq -r .verdict /tmp/real.json) (global; a asercao e por id)"
+          echo "acenderam no runner:"
+          jq -r '.checks[] | select(.status=="RED" or .status=="YELLOW")
+                 | "  \(.status)\t\(.id)\t\(.actual)"' /tmp/real.json
 
       # O contraponto: com a config aberta, os mesmos casos tem de acender.
       # Sem este passo, um bug que fizesse tudo virar GREEN passaria batido.
