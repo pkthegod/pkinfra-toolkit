@@ -32,10 +32,12 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: pytest do build
+      - name: pytest
         run: |
-          python -m pip install --quiet pytest
-          python -m pytest tests/ -q
+          python -m pip install --quiet pytest pytest-xdist
+          # -n auto: a suite roda validate.sh de verdade dezenas de vezes,
+          # cada uma com stubs proprios. Em serie leva minutos.
+          python -m pytest tests/ -q -n auto
 
       - name: build do tarball
         run: ./build.sh
@@ -129,3 +131,119 @@ jobs:
           test ! -e /usr/local/sbin/pkassess.sh
           test ! -e /usr/local/sbin/deb-release-upgrade.sh
           test -d /var/lib/pkops
+
+  # A matriz RED/GREEN roda contra um host sintetico. Este job roda a suite
+  # contra um bind9 DE VERDADE: e o unico lugar onde os stubs sao conferidos
+  # com a realidade. Stub que envelhece silenciosamente e o jeito classico de
+  # uma suite inteira virar decoracao.
+  dns-real:
+    # Sem container de proposito: o runner tem systemd de verdade, e sem
+    # systemctl a suite pularia o modulo inteiro — o job passaria sem ter
+    # testado nada.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: bind9 autoritativo + recursivo
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            bind9 bind9-utils bind9-dnsutils dns-root-data jq
+
+          # systemd-resolved fica em 127.0.0.53; o named vai para 127.0.0.1.
+          sudo tee /etc/bind/named.conf.options >/dev/null <<'EOF'
+          options {
+              directory "/var/cache/bind";
+              listen-on port 53 { 127.0.0.1; };
+              listen-on-v6 { none; };
+              allow-recursion { 127.0.0.0/8; };
+              allow-transfer { none; };
+              dnssec-validation auto;
+              max-cache-size 30%;
+              version "none";
+              querylog no;
+          };
+          EOF
+          sudo tee /etc/bind/named.conf.local >/dev/null <<'EOF'
+          zone "exemplo.local" {
+              type master;
+              file "/etc/bind/db.exemplo.local";
+          };
+          EOF
+          sudo tee /etc/bind/db.exemplo.local >/dev/null <<'EOF'
+          $TTL 3600
+          @   IN  SOA ns1.exemplo.local. root.exemplo.local. (
+                  2026081201 7200 3600 1209600 3600 )
+          @   IN  NS  ns1.exemplo.local.
+          ns1 IN  A   127.0.0.1
+          www IN  A   10.0.0.9
+          EOF
+          sudo named-checkconf -z
+          sudo systemctl restart named || sudo systemctl restart bind9
+          for i in $(seq 20); do
+            dig @127.0.0.1 exemplo.local SOA +short >/dev/null 2>&1 && break
+            sleep 1
+          done
+          dig @127.0.0.1 www.exemplo.local A +short
+
+      # Este passo e o que impede a matriz RED/GREEN de virar decoracao: os
+      # stubs do conftest reproduzem a saida do dig e do named-checkconf, e
+      # formato de saida muda entre versoes. Aqui os mesmos parsers da suite
+      # sao conferidos contra as ferramentas de verdade.
+      - name: os parsers batem com a saida real do bind
+        run: |
+          set -e
+          dig @127.0.0.1 exemplo.local SOA | grep -qE '^;; flags:.* aa' \
+            || { echo "::error::flag AA nao encontrada — parser de flags desatualizado"; exit 1; }
+          dig @127.0.0.1 nao-existe.exemplo.local A | grep -qP 'status:\s*\KNXDOMAIN' \
+            || { echo "::error::parser de status nao casa com a saida do dig"; exit 1; }
+          dig @127.0.0.1 exemplo.local AXFR | grep -qE 'Transfer failed|REFUSED' \
+            || { echo "::error::AXFR deveria ser recusado com allow-transfer none"; exit 1; }
+          named-checkzone exemplo.local /etc/bind/db.exemplo.local \
+            | grep -qP 'loaded serial\s*\K2026081201' \
+            || { echo "::error::parser de serial nao casa com named-checkzone"; exit 1; }
+          sudo named-checkconf -p /etc/bind/named.conf | grep -qP '^\s*allow-transfer' \
+            || { echo "::error::o dump de named-checkconf -p mudou de formato"; exit 1; }
+          echo "parsers conferidos contra $(named -v)"
+
+      - name: a suite roda de ponta a ponta contra o bind real
+        run: |
+          sudo ./bin/validate.sh --deep --only bind --json > /tmp/real.json || true
+          jq -e '.schema == 2 and .tool == "validate"' /tmp/real.json
+          jq -e '.checks | length >= 20' /tmp/real.json \
+            || { echo "::error::a suite pulou o modulo bind num host que TEM bind"; \
+                 jq . /tmp/real.json; exit 1; }
+          jq -e '.checks | all(has("id") and has("status") and has("fix"))' /tmp/real.json
+
+          # So os casos que nao dependem de rede de terceiro. DNSSEC externo
+          # (iana.org, dnssec-failed.org) e NXDOMAIN via raiz deixariam o CI
+          # refem da internet — quebra vermelha sem bug nenhum.
+          for id in bind.servico bind.porta.tcp bind.porta.udp bind.checkconf \
+                    bind.zonas bind.recursao bind.transferencia bind.version \
+                    bind.dnssec.validacao bind.cache.limite \
+                    bind.q.autoritativa bind.q.serial bind.q.axfr; do
+            cor=$(jq -r --arg i "$id" '.checks[] | select(.id==$i) | .status' /tmp/real.json)
+            [ "$cor" = "GREEN" ] || {
+              echo "::error::$id deveria estar GREEN num bind bem configurado, veio '$cor'"
+              jq --arg i "$id" '.checks[] | select(.id==$i)' /tmp/real.json
+              exit 1
+            }
+          done
+          echo "veredito: $(jq -r .verdict /tmp/real.json)"
+
+      # O contraponto: com a config aberta, os mesmos casos tem de acender.
+      # Sem este passo, um bug que fizesse tudo virar GREEN passaria batido.
+      - name: config insegura acende RED no bind real
+        run: |
+          sudo sed -i 's/allow-recursion { 127.0.0.0\/8; };/allow-recursion { any; };/; \
+                       s/allow-transfer { none; };/allow-transfer { any; };/' \
+            /etc/bind/named.conf.options
+          sudo systemctl reload named || sudo systemctl reload bind9
+          sleep 2
+          sudo ./bin/validate.sh --only bind --json > /tmp/aberto.json || true
+          for id in bind.recursao bind.transferencia; do
+            cor=$(jq -r --arg i "$id" '.checks[] | select(.id==$i) | .status' /tmp/aberto.json)
+            [ "$cor" = "RED" ] || { echo "::error::$id nao acendeu com config aberta: '$cor'"; exit 1; }
+          done
+          sudo ./bin/validate.sh --only bind >/dev/null 2>&1; rc=$?
+          [ "$rc" = "2" ] || { echo "::error::exit esperado 2 com RED, veio $rc"; exit 1; }
