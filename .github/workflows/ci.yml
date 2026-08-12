@@ -257,5 +257,10 @@ jobs:
             cor=$(jq -r --arg i "$id" '.checks[] | select(.id==$i) | .status' /tmp/aberto.json)
             [ "$cor" = "RED" ] || { echo "::error::$id nao acendeu com config aberta: '$cor'"; exit 1; }
           done
-          sudo ./bin/validate.sh --only bind >/dev/null 2>&1; rc=$?
+          # `cmd; rc=$?` NAO serve aqui: o runner roda o passo com `bash -e`, e
+          # o shell aborta no proprio cmd antes de chegar na atribuicao. O
+          # passo morria com o exit 2 do validate.sh — que e justamente o
+          # valor que ele queria conferir — e sem imprimir mensagem nenhuma.
+          rc=0
+          sudo ./bin/validate.sh --only bind >/dev/null 2>&1 || rc=$?
           [ "$rc" = "2" ] || { echo "::error::exit esperado 2 com RED, veio $rc"; exit 1; }
