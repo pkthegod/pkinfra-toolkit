@@ -43,7 +43,7 @@ run() { [[ $DRY -eq 1 ]] && { printf '  %s[dry]%s %s\n' "$C_Y" "$C_0" "$*"; retu
 # --- desinstalacao -----------------------------------------------------------
 if [[ $UNINSTALL -eq 1 ]]; then
   head1 "Desinstalando"
-  for f in pkassess.sh pve-upgrade.sh proxmox_tune.sh tune-profile.sh setup-unbound.sh validate.sh deb-release-upgrade.sh pkops; do
+  for f in pkassess.sh pve-upgrade.sh proxmox_tune.sh tune-profile.sh setup-unbound.sh validate.sh update-root-hints.sh deb-release-upgrade.sh pkops; do
     [[ -e "${BINDIR}/${f}" ]] && { run rm -f "${BINDIR}/${f}"; ok "removido ${BINDIR}/${f}"; }
   done
   [[ -e "${LIBDIR}/pkops.sh" ]] && { run rm -f "${LIBDIR}/pkops.sh"; ok "removido ${LIBDIR}/pkops.sh"; }
@@ -71,7 +71,7 @@ else
 fi
 
 # --- o que instalar ----------------------------------------------------------
-INSTALL_LIST=(pkassess.sh tune-profile.sh setup-unbound.sh validate.sh deb-release-upgrade.sh)
+INSTALL_LIST=(pkassess.sh tune-profile.sh setup-unbound.sh validate.sh update-root-hints.sh deb-release-upgrade.sh)
 if [[ $IS_PVE -eq 1 || $ALL -eq 1 ]]; then
   INSTALL_LIST+=(pve-upgrade.sh proxmox_tune.sh)
 fi

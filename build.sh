@@ -52,6 +52,7 @@ CONTEUDO=(
   bin/tune-profile.sh
   bin/setup-unbound.sh
   bin/validate.sh
+  bin/update-root-hints.sh
   bin/deb-release-upgrade.sh
   docs/TOOLKIT.md
   docs/RUNBOOK.md
