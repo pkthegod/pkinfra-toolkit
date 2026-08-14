@@ -87,6 +87,7 @@ done
 | `bin/tune-profile.sh` | 1.0 | tuning de guest — 8 perfis de carga |
 | `bin/setup-unbound.sh` | 2.0 | resolvedor recursivo validante |
 | `bin/validate.sh` | 2.0 | **valida e testa** o runtime — RED/GREEN, `--deep`, `--json`, `--report` |
+| `bin/update-root-hints.sh` | 1.0 | atualiza o `root.hints` sem derrubar o DNS — baixa antes de trocar |
 | `bin/deb-release-upgrade.sh` | 1.0 | upgrade de release Debian, **um salto por vez** |
 | `docs/TOOLKIT.md` | — | **referência completa** |
 
@@ -186,6 +187,29 @@ correção — dá para montar o laudo do jeito que você quiser:
 jq -r 'if .verdict=="OK" then "ok" else "nok" end' /tmp/host.json
 jq -r '.checks[] | select(.status=="RED") | "\(.id): esperado \(.expected), veio \(.actual) -> \(.fix)"' /tmp/host.json
 ```
+
+### Atualizar o `root.hints`
+
+```bash
+update-root-hints.sh --check       # baixa, compara e relata; não instala
+update-root-hints.sh               # instala só se o publicado for mais atual
+```
+
+A ordem é o ponto. A sequência intuitiva — `mv` o hints, `apt install wget`,
+baixar — se autodestrói: sem hints o resolvedor perde a raiz, e o host fica
+sem como buscar justamente o arquivo que o conserta. Aqui o download vai para
+`root.hints2`, **ao lado**, e o arquivo em uso só é tocado depois que o novo
+existe, passa na validação e prova ser mais atual pelo `related version of
+root zone`.
+
+Recusa três coisas que passariam batido: HTML de portal cativo respondido com
+200, arquivo truncado, e versão **mais antiga** que a instalada (mirror velho
+ou `--url` errado rebaixaria o hints). Depois do restart confere se a raiz
+volta a responder — e **desfaz** se não voltar.
+
+> `/usr/share/dns/root.hints` pertence ao pacote `dns-root-data`: o próximo
+> `apt upgrade` dele reverte a atualização em silêncio. O script avisa. Para
+> durar, aponte a config para um caminho seu.
 
 ### Gestão
 
