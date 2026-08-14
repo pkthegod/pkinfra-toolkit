@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# validate.sh — v2.0
+# validate.sh — v2.1
 # Suite consolidada de validacao e TESTE de estado de runtime.
 #
 # Duas camadas, uma ferramenta:
@@ -56,7 +56,7 @@
 # =============================================================================
 set -uo pipefail
 
-TOOL="validate"; VERSION="2.0"; SCHEMA=2
+TOOL="validate"; VERSION="2.1"; SCHEMA=2
 
 JSON=0; REPORT=0; ONLY=""; SKIP_MODS=""; QUIET=0; DEEP=0; STRICT=0
 DNS_TIMEOUT="${DNS_TIMEOUT:-3}"
@@ -261,6 +261,60 @@ _dig_answer() {
 }
 _dig_ttl()     { _dig_answer "$1" | awk 'NR==1{print $2}'; }
 _dig_ancount() { grep -oP 'ANSWER:\s*\K[0-9]+' <<<"${1:-}" | head -1; }
+
+# --- DNSSEC: os dois casos dependem de dominio de TERCEIRO --------------------
+# AUSENCIA DE RESPOSTA NAO E VEREDITO sobre este host. Pode ser o dominio de
+# teste fora do ar, ou o proprio veredito demorando mais que DNS_TIMEOUT —
+# validacao que FALHA e lenta, porque o resolvedor tenta todos os NS e todos os
+# algoritmos antes de desistir e devolver SERVFAIL.
+#
+# A v2.0 comparava contra uma string so, entao "sem resposta" caia no mesmo
+# ramo de "NOERROR" e pintava o host inteiro de FALHA com exit 2. Num cron ou
+# num gate de Zabbix isso acorda alguem por um dominio que nao e dele — e uma
+# suite que da alarme falso e a primeira a ser ignorada.
+#
+# Por isso a baliza tem TRES saidas:
+#   veredito esperado -> GREEN
+#   veredito oposto   -> RED     (isto sim e defeito local)
+#   sem veredito      -> YELLOW  inconclusivo, com como confirmar a mao
+#
+# Os dois helpers recebem o id LITERAL do chamador: bind e unbound compartilham
+# a logica sem compartilhar o id, e o extrator de cobertura continua enxergando
+# cada caso (ver tests/test_cobertura.py).
+_CD="confirme a mao com 'dig @127.0.0.1 dnssec-failed.org A +time=10' e a mesma com +cd, que desliga a validacao naquela consulta"
+
+caso_dnssec_negativo() { # <id>
+  local id="$1" tit="DNSSEC rejeita quebrado" r st
+  r=$(_dig 127.0.0.1 dnssec-failed.org A)
+  st=$(_dig_status "$r")
+  case "$st" in
+    SERVFAIL) verde "$id" "$tit" "SERVFAIL" ;;
+    NOERROR)  vermelho "$id" "$tit" "SERVFAIL" "NOERROR" \
+                "validacao desligada: o resolvedor aceita resposta forjada" ;;
+    "")       amarelo "$id" "$tit" "SERVFAIL" "sem resposta" \
+                "inconclusivo, nao acusa este host: ${_CD}" ;;
+    *)        amarelo "$id" "$tit" "SERVFAIL" "$st" \
+                "status inesperado; ${_CD}" ;;
+  esac
+}
+
+caso_dnssec_positivo() { # <id>
+  local id="$1" tit="DNSSEC valida assinado" r st
+  r=$(_dig 127.0.0.1 iana.org A +dnssec)
+  st=$(_dig_status "$r")
+  if _dig_tem_flag "$r" ad; then
+    verde "$id" "$tit" "iana.org com flag AD"
+  elif [[ -z "$st" ]]; then
+    amarelo "$id" "$tit" "flag AD" "sem resposta" \
+      "inconclusivo: iana.org nao respondeu — e rede, nao validacao"
+  elif [[ "$st" == "NOERROR" ]]; then
+    vermelho "$id" "$tit" "flag AD" "sem AD (flags: $(_dig_flags "$r"))" \
+      "respondeu sem validar; confira dnssec-validation e o relogio do host"
+  else
+    amarelo "$id" "$tit" "flag AD" "$st" \
+      "iana.org devolveu ${st}; suspeite de trust anchor vencido ou saida 53 bloqueada"
+  fi
+}
 
 # =============================================================================
 # core
@@ -720,23 +774,11 @@ mod_bind() {
       "$(_dig_status "$r")" "middlebox descartando EDNS e a causa mais comum"
   fi
 
-  # DNSSEC positivo: dominio assinado tem de voltar com AD.
-  r=$(_dig 127.0.0.1 iana.org A +dnssec)
-  if _dig_tem_flag "$r" ad; then
-    verde "bind.q.dnssec.positivo" "DNSSEC valida assinado" "iana.org com flag AD"
-  else
-    vermelho "bind.q.dnssec.positivo" "DNSSEC valida assinado" "flag AD" \
-      "sem AD (flags: $(_dig_flags "$r"))" \
-      "o validator nao esta validando; confira dnssec-validation e o relogio do host"
-  fi
-
-  # DNSSEC negativo: dominio quebrado de proposito. A resposta CERTA e
-  # SERVFAIL. Receber NOERROR aqui significa que a validacao esta desligada —
-  # e esse e o caso que passa despercebido, porque 'funciona'.
-  r=$(_dig 127.0.0.1 dnssec-failed.org A)
-  st=$(_dig_status "$r")
-  afere "bind.q.dnssec.negativo" "DNSSEC rejeita quebrado" "SERVFAIL" "${st:-sem resposta}" \
-    "NOERROR significa validacao desligada: o resolvedor aceita resposta forjada"
+  # DNSSEC, os dois lados. Dominio assinado tem de voltar com AD; dominio
+  # quebrado de proposito tem de voltar SERVFAIL. Ver caso_dnssec_* para por
+  # que "sem resposta" nao e RED.
+  caso_dnssec_positivo "bind.q.dnssec.positivo"
+  caso_dnssec_negativo "bind.q.dnssec.negativo"
 
   # Cache ativo: a segunda consulta ao mesmo nome tem de voltar com TTL menor.
   # TTL igual duas vezes seguidas e sinal de cache desabilitado ou forwarder
@@ -745,8 +787,13 @@ mod_bind() {
   ttl1=$(_dig_ttl "$(_dig 127.0.0.1 example.com A)")
   ttl2=$(_dig_ttl "$(_dig 127.0.0.1 example.com A)")
   if [[ "${ttl1:-}" =~ ^[0-9]+$ && "${ttl2:-}" =~ ^[0-9]+$ ]]; then
-    if [[ $ttl2 -le $ttl1 ]]; then
+    if [[ $ttl2 -lt $ttl1 ]]; then
       verde "bind.q.cache" "cache em uso" "TTL decrescente (${ttl1} -> ${ttl2})"
+    elif [[ $ttl2 -eq $ttl1 ]]; then
+      # Passa: a regra e o TTL nao CRESCER. Mas anunciar "decrescente" com dois
+      # numeros iguais e o relatorio dizendo uma coisa e mostrando outra — as
+      # duas consultas cairam no mesmo segundo e o contador nao virou.
+      verde "bind.q.cache" "cache em uso" "TTL estavel (${ttl1} -> ${ttl2}, mesmo segundo)"
     else
       amarelo "bind.q.cache" "cache em uso" "TTL decrescente" "${ttl1} -> ${ttl2}" \
         "TTL que sobe indica resposta vindo de fora do cache a cada consulta"
@@ -913,17 +960,8 @@ mod_unbound() {
   afere "unbound.q.tcp" "consulta via TCP" "NOERROR" "$(_dig_status "$r")" \
     "libere 53/tcp; resposta grande depende dele"
 
-  r=$(_dig 127.0.0.1 iana.org A +dnssec)
-  if _dig_tem_flag "$r" ad; then
-    verde "unbound.q.dnssec.positivo" "DNSSEC valida assinado" "iana.org com flag AD"
-  else
-    vermelho "unbound.q.dnssec.positivo" "DNSSEC valida assinado" "flag AD" \
-      "sem AD (flags: $(_dig_flags "$r"))" "trust anchor ausente ou relogio fora de sincronia"
-  fi
-
-  r=$(_dig 127.0.0.1 dnssec-failed.org A)
-  afere "unbound.q.dnssec.negativo" "DNSSEC rejeita quebrado" "SERVFAIL" "$(_dig_status "$r")" \
-    "NOERROR significa validacao desligada"
+  caso_dnssec_positivo "unbound.q.dnssec.positivo"
+  caso_dnssec_negativo "unbound.q.dnssec.negativo"
 
   local t0 t1
   t0=$(_ms_agora); _dig 127.0.0.1 example.com A >/dev/null; t1=$(_ms_agora)

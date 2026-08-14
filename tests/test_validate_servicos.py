@@ -131,6 +131,13 @@ DEFEITOS_UNBOUND = [
         "unbound.q.dnssec.negativo", "RED",
     ),
     (
+        # O unbound compartilha os helpers com o bind: se o ramo inconclusivo
+        # divergir entre os dois, este caso cai.
+        "dominio de teste DNSSEC nao responde",
+        lambda h: h.caso("dig", "*dnssec-failed.org A*", 9, ""),
+        "unbound.q.dnssec.negativo", "YELLOW",
+    ),
+    (
         "TCP nao responde",
         lambda h: h.caso("dig", "*google.com A*+tcp*", 9, ""),
         "unbound.q.tcp", "RED",

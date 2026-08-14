@@ -260,6 +260,20 @@ DEFEITOS_ATIVOS = [
         "bind.q.dnssec.negativo", "RED",
     ),
     (
+        # A distincao que a v2.0 nao fazia: sem resposta NAO e o mesmo que
+        # NOERROR. Dominio de teste fora do ar, ou veredito de validacao
+        # demorando mais que o timeout, nao dizem nada sobre este host — e
+        # pintavam a suite inteira de FALHA com exit 2.
+        "dominio de teste DNSSEC nao responde",
+        lambda h: h.caso("dig", "*dnssec-failed.org A*", 9, ""),
+        "bind.q.dnssec.negativo", "YELLOW",
+    ),
+    (
+        "iana.org nao responde ao teste positivo",
+        lambda h: h.caso("dig", "*iana.org A*+dnssec*", 9, ""),
+        "bind.q.dnssec.positivo", "YELLOW",
+    ),
+    (
         "AXFR liberado para quem pedir",
         lambda h: h.caso("dig", f"*{ZONA} AXFR*", 0,
                          f"{ZONA}.\t3600\tIN\tSOA\tns1.{ZONA}. root.{ZONA}. {SERIAL} 7200 3600 1209600 3600\n"

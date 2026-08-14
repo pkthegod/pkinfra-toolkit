@@ -86,7 +86,7 @@ done
 | `bin/proxmox_tune.sh` | 3.1.0 | tuning do host PVE |
 | `bin/tune-profile.sh` | 1.0 | tuning de guest — 8 perfis de carga |
 | `bin/setup-unbound.sh` | 2.0 | resolvedor recursivo validante |
-| `bin/validate.sh` | 2.0 | **valida e testa** o runtime — RED/GREEN, `--deep`, `--json`, `--report` |
+| `bin/validate.sh` | 2.1 | **valida e testa** o runtime — RED/GREEN, `--deep`, `--json`, `--report` |
 | `bin/update-root-hints.sh` | 1.0 | atualiza o `root.hints` sem derrubar o DNS — baixa antes de trocar |
 | `bin/deb-release-upgrade.sh` | 1.0 | upgrade de release Debian, **um salto por vez** |
 | `docs/TOOLKIT.md` | — | **referência completa** |
