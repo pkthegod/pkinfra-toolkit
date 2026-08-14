@@ -36,9 +36,15 @@ TESTES = Path(__file__).parent
 # `verde`/`vermelho` com o id em "$1", que o extrator nao enxerga. Sem ele aqui
 # os quatro casos de porta ficariam invisiveis para a matriz — e a suite
 # passaria a ter checagem de socket sem prova de que detecta socket ausente.
+#
+# `caso_dnssec_positivo`/`caso_dnssec_negativo` entram pelo mesmo motivo: bind e
+# unbound compartilham a logica, e o id chega ao helper como "$1". Por isso o
+# chamador passa o id LITERAL — se o helper montasse o id a partir do modulo,
+# os quatro casos de DNSSEC sumiriam da matriz sem nada acusar.
 EMISSORES = ("verde", "vermelho", "amarelo", "pulado", "afere", "afere_min",
-             "afere_max", "caso_porta")
-ACENDEM = ("vermelho", "amarelo", "afere", "afere_min", "afere_max", "caso_porta")
+             "afere_max", "caso_porta", "caso_dnssec_positivo", "caso_dnssec_negativo")
+ACENDEM = ("vermelho", "amarelo", "afere", "afere_min", "afere_max", "caso_porta",
+           "caso_dnssec_positivo", "caso_dnssec_negativo")
 
 
 def _extrai(emissores):
