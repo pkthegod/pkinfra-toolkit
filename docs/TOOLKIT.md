@@ -110,6 +110,18 @@ Ciclo por servidor:
 --assess  →  --apply  →  reboot  →  --validate  →  proxmox_tune.sh  →  repete
 ```
 
+**O alvo é 9.2, não 9.** O kernel 7.0 só existe no PVE 9.2 (9.1 = 6.17,
+9.0 = 6.14). O salto 8→9 aterrissa no **9.0 e para**; os minors seguintes
+só vêm rodando `--apply` de novo depois do reboot. Desde a v3.3.0 o script
+reporta explicitamente se o alvo foi ou não alcançado, em vez de encerrar
+em silêncio no 9.0.
+
+**Os dois `--force` são coisas diferentes.** `--force-hw` ignora o veto de
+score do `--assess` e custa performance; `--force-cgroup` atropela o
+bloqueio de CT legado no 8→9 e o container **deixa de iniciar**. Eram uma
+flag só até a v3.2.0 — quem forçava hardware levava junto, calado, o bypass
+que para serviço.
+
 Idempotência **sem arquivo de progresso**: o estado é derivado do próprio
 sistema (`pveversion`, `/etc/os-release`, conteúdo dos sources). Rodar duas
 vezes na mesma fase é no-op; interromper no meio e reexecutar retoma do
@@ -121,8 +133,8 @@ não decide nada, a CPU decide:
 | Config | Score | Alvo |
 |---|---|---|
 | R410/R610 Nehalem (E5504/E5520/X5570) | 20–35 | PVE 8 |
-| R610/R710 Westmere (E5620/X5650/X5670) | 85–90 | PVE 9 |
-| Haswell+ (E5 v3+) | 100 | PVE 9 |
+| R610/R710 Westmere (E5620/X5650/X5670) | 85–90 | PVE 9.2 |
+| Haswell+ (E5 v3+) | 100 | PVE 9.2 |
 
 O divisor é **PCID** (−35 pontos): sem ele o KPTI invalida a TLB a cada
 syscall, custando 20–40% em I/O — o pior perfil possível para hipervisor.

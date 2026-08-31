@@ -214,10 +214,18 @@ proxmox_tune.sh
 Ele detecta se há VM com `hostnodes=` e ajusta `numa_balancing`
 automaticamente — não desfaz pinning que você tenha feito.
 
-### 2.6 Repetir se for para o 9
+### 2.6 Repetir até o 9.2
 
 ```bash
-pve-upgrade.sh --apply --target 9    # só se o --assess autorizou
+pve-upgrade.sh --apply --target 9.2   # só se o --assess autorizou
+```
+
+**O salto 8→9 para no 9.0.** Os minors 9.0 → 9.1 → 9.2 — e o kernel 7.0,
+que só existe no 9.2 — exigem rodar `--apply` **de novo** depois do reboot,
+quantas vezes for preciso. O script diz em qual pé está:
+
+```bash
+pve-upgrade.sh --status               # mostra se o alvo foi alcançado
 ```
 
 - [ ] tmux ativo

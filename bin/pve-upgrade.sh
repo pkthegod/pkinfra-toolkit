@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# pve-upgrade.sh v3.1.0 — upgrade idempotente Proxmox VE 6 -> 7 -> 8 -> 9
+# pve-upgrade.sh v3.3.0 — upgrade idempotente Proxmox VE 6 -> 7 -> 8 -> 9.2
 #
 # Par de proxmox_tune.sh. Compartilham /var/lib/pve-maint (schema 1).
 #   upgrade = pontual (3-4x na vida do servidor), ABORTA em bloqueador
@@ -15,9 +15,20 @@
 #   6. ./proxmox_tune.sh              re-tuna no kernel novo
 #   7. repete 2-6 ate o target
 #
+# CHEGAR AO 9.2 EXIGE UMA PASSADA EXTRA: o salto 8->9 aterrissa no 9.0 e
+# para. Os minors 9.0 -> 9.1 -> 9.2 (kernel 7.0) so vem rodando --apply DE
+# NOVO depois do reboot. "Cheguei ao PVE 9" nao e "cheguei ao 9.2".
+#
 # MODOS:  --assess  --validate  --status  --check
-# FLAGS:  --target N  --yes  --allow-ssh  --allow-console
-#         --skip-checker  --force-hw
+# FLAGS:  --target N[.M]  --yes  --allow-ssh  --allow-console
+#         --skip-checker  --force-hw  --force-cgroup
+#
+# OS DOIS --force NAO SAO A MESMA COISA:
+#   --force-hw      ignora o veto de score do --assess. Custa PERFORMANCE.
+#   --force-cgroup  atropela o bloqueio de CT legado no 8->9. O CT NAO
+#                   INICIA MAIS — cgroupv1 foi removido do PVE 9.
+# Eram uma flag so ate a v3.3.0, e quem forcava hardware levava junto, em
+# silencio, o bypass que para servico.
 #
 # MAPA:  PVE 6=buster/5.4  7=bullseye/5.15  8=bookworm/6.2-6.14
 #        PVE 9=trixie: 9.0=6.14  9.1=6.17  9.2=7.0 (QEMU 11, ZFS 2.4)
@@ -25,7 +36,7 @@
 set -uo pipefail
 
 TOOL="pve-upgrade"
-VERSION="3.2.0"
+VERSION="3.3.0"
 
 # ==== BLOCO DE ESTADO COMPARTILHADO (schema 1) ==============================
 # IDENTICO em pve-upgrade.sh e proxmox_tune.sh.
@@ -124,8 +135,12 @@ state_in_mux()         { [[ -n "${TMUX:-}${STY:-}" ]] || state_has_ancestor '^(t
 BACKUP_DIR="$STATE_ROOT/backups/$(date +%Y%m%d-%H%M%S)"
 RUN_LOG="$STATE_ROOT/run-upgrade-$(date +%Y%m%d-%H%M%S).log"
 
-APPLY=0; ASSUME_YES=0; ALLOW_SSH=0; SKIP_CHECKER=0; FORCE_HW=0; ALLOW_CONSOLE=0
-TARGET=9; MODE="run"
+APPLY=0; ASSUME_YES=0; ALLOW_SSH=0; SKIP_CHECKER=0; ALLOW_CONSOLE=0
+FORCE_HW=0; FORCE_CGROUP=0
+# TARGET_FULL pode ter minor ("9.2"); TARGET e so o major, usado no despacho
+# de fase. A separacao nao e cosmetica: [[ 9 -ge 9.2 ]] aborta o script porque
+# o bash trata como aritmetica e "9.2" nao e inteiro valido.
+TARGET_FULL="9.2"; TARGET=9; MODE="run"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -139,8 +154,14 @@ while [[ $# -gt 0 ]]; do
     --allow-console) ALLOW_CONSOLE=1 ;;
     --skip-checker) SKIP_CHECKER=1 ;;
     --force-hw)     FORCE_HW=1 ;;
-    --target)       TARGET="${2:-9}"; shift ;;
-    --help|-h)      sed -n '2,30p' "$0"; exit 0 ;;
+    --force-cgroup) FORCE_CGROUP=1 ;;
+    --target)
+        TARGET_FULL="${2:-}"; shift
+        [[ "$TARGET_FULL" =~ ^[0-9]+(\.[0-9]+)?$ ]] \
+          || { echo "--target invalido: '$TARGET_FULL' (use 7, 8, 9 ou 9.2)"; exit 2; }
+        TARGET="${TARGET_FULL%%.*}"
+        ;;
+    --help|-h)      sed -n '2,35p' "$0"; exit 0 ;;
     *) echo "flag desconhecida: $1 (use --help)"; exit 2 ;;
   esac
   shift
@@ -405,19 +426,30 @@ hw_assess() {
   log ""; log "  Score: ${score}/100"; log ""
   log "  Referencia Dell 11G (decide a CPU, nao o chassi):"
   log "    R410/R610 Nehalem  (E5504/E5520/X5570) ...... ~20-35 -> PVE 8"
-  log "    R610/R710 Westmere (E5620/X5650/X5670) ...... ~85-90 -> PVE 9"
-  log "    Haswell+ (E5 v3+) ........................... ~100   -> PVE 9"
+  log "    R610/R710 Westmere (E5620/X5650/X5670) ...... ~85-90 -> PVE 9.2"
+  log "    Haswell+ (E5 v3+) ........................... ~100   -> PVE 9.2"
   log ""
 
-  local rec=9
+  local rec=9.2
   if   [[ ${#blockers[@]} -gt 0 ]]; then rec=8; err "Resolva os bloqueadores antes do PVE 9."
-  elif [[ $score -ge 70 ]]; then ok "RECOMENDADO: subir ate o PVE 9."
+  elif [[ $score -ge 70 ]]; then ok "RECOMENDADO: subir ate o PVE 9.2."
   elif [[ $score -ge 45 ]]; then
-    warn "VIAVEL COM RESSALVAS: PVE 9 roda com perda de performance."
+    warn "VIAVEL COM RESSALVAS: PVE 9.2 roda com perda de performance."
     warn "  PVE 8 saiu de suporte (~jul/2026); ficar parado tambem e risco."
   else rec=8
-    err "NAO RECOMENDADO subir ao PVE 9."
+    err "NAO RECOMENDADO subir ao PVE 9 por PERFORMANCE."
     err "  Melhor uso: PVE 8 isolado, storage/backup, ou aposentar."
+  fi
+
+  # O veto acima e de PERFORMANCE e nao se sustenta sozinho quando o driver
+  # e seguranca: o PVE 8 saiu de suporte e o kernel 7.0 so existe no 9.2.
+  # Sem dizer isso aqui, o host fica parado no 8 por um motivo que ninguem
+  # reavaliou — e o --assess vira o carimbo que justifica a exposicao.
+  if ! dpkg --compare-versions "$rec" ge "9.2"; then
+    warn "CONSEQUENCIA: parando em $rec, este host fica ABAIXO do kernel 7.0"
+    warn "  (7.0 = PVE 9.2; 9.1 = 6.17; 9.0 = 6.14)"
+    warn "  Se o driver for seguranca, as opcoes reais sao trocar o hardware,"
+    warn "  aposentar o host, ou assumir a perda: --target 9.2 --force-hw"
   fi
 
   log ""; log "  Proximo: ./pve-upgrade.sh --apply --target $rec"
@@ -518,12 +550,21 @@ preflight() {
   command -v pveversion >/dev/null || die "nao parece um host Proxmox VE"
   state_init; state_facts_write
 
-  info "PVE $(pve_full) | Debian $(deb_code) | kernel $(uname -r) | target $TARGET"
+  info "PVE $(pve_full) | Debian $(deb_code) | kernel $(uname -r) | target $TARGET_FULL"
 
   if [[ -f "$STATE_ROOT/hw-target" && $FORCE_HW -eq 0 ]]; then
-    local hwt; hwt=$(cat "$STATE_ROOT/hw-target")
-    [[ $TARGET -gt ${hwt:-9} ]] && \
-      die "--assess recomendou target=$hwt aqui. Use --target $hwt ou --force-hw"
+    local hwt; hwt=$(cat "$STATE_ROOT/hw-target" 2>/dev/null)
+    # dpkg, nunca [[ -gt ]]: o alvo passou a ter minor e o teste aritmetico
+    # do bash morre em "9.2: invalid arithmetic operator".
+    if [[ ! "$hwt" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+      warn "hw-target ilegivel ('$hwt') — rode --assess de novo; seguindo sem veto"
+    elif dpkg --compare-versions "$TARGET_FULL" gt "$hwt"; then
+      err "--assess recomendou target=$hwt neste host; voce pediu $TARGET_FULL."
+      err "  Se o hw-target foi gravado antes da v3.3.0, ele nao conhecia o"
+      err "  9.2: rode ./pve-upgrade.sh --assess de novo e releia o veredito."
+      err "  Parar em $hwt deixa o host abaixo do kernel 7.0 (so o 9.2 tem)."
+      die "use --target $hwt, ou --force-hw se aceitar a perda de performance"
+    fi
   elif [[ ! -f "$STATE_ROOT/hw-target" ]]; then
     warn "rode ./pve-upgrade.sh --assess antes, para calibrar a versao-alvo"
   fi
@@ -588,7 +629,7 @@ preflight() {
   confirm "backups verificados e acesso out-of-band disponivel?" || die "abortado"
 
   is_cluster && warn "CLUSTER — atualize UM no por vez, migre guests antes"
-  state_event "PREFLIGHT_OK" "pve=$(pve_full) target=$TARGET"
+  state_event "PREFLIGHT_OK" "pve=$(pve_full) target=$TARGET_FULL"
   ok "preflight concluido"
 }
 
@@ -835,8 +876,11 @@ phase_8_to_9() {
   local bad; bad=$(cgroupv1_cts)
   if [[ -n "${bad// /}" ]]; then
     err "containers legados:$bad — PVE 9 removeu cgroupv1, NAO iniciam."
-    [[ $FORCE_HW -eq 1 ]] && warn "--force-hw: prosseguindo [PERIGOSO]" \
-      || die "migre esses containers antes do PVE 9"
+    # Flag PROPRIA. O veto de hardware e de performance e nao pode arrastar
+    # junto, calado, o bypass de um bloqueio que deixa servico fora do ar.
+    [[ $FORCE_CGROUP -eq 1 ]] \
+      && warn "--force-cgroup: prosseguindo [PERIGOSO — os CTs acima nao sobem mais]" \
+      || die "migre esses containers antes do PVE 9 (ou --force-cgroup, ciente disso)"
   fi
   if has_ceph; then
     local cv; cv=$(ceph version 2>/dev/null | grep -oP 'version \K\d+')
@@ -889,17 +933,34 @@ phase_8_to_9() {
   pause_reboot "PVE 9 instalado. Reinicie mesmo se ja usava kernel 6.14 opt-in."
 }
 
+# O alvo pode ter minor, e o major sozinho nao prova que se chegou nele: o
+# salto 8->9 aterrissa no 9.0 e os minors seguintes exigem outra passada.
+# Sem este relatorio o operador encerra no 9.0 achando que terminou.
+minor_target_report() {
+  local cur; cur=$(pve_full)
+  [[ -z "$cur" ]] && return 0
+  if ver_ge "$cur" "$TARGET_FULL"; then
+    ok "alvo $TARGET_FULL alcancado (PVE $cur)"
+  else
+    warn "AINDA NAO NO ALVO: PVE $cur, alvo $TARGET_FULL"
+    warn "  rode --apply de novo depois do reboot."
+    warn "  se nada mudar, o canal '$(repo_flavor)' ainda nao publicou o $TARGET_FULL"
+  fi
+}
+
 phase_minor_update() {
   head1 "FASE MINOR — dentro do PVE $(pve_major)"
   apt_refresh
   local n; n=$(apt-get -s dist-upgrade 2>/dev/null | grep -c '^Inst' || true)
-  [[ ${n:-0} -eq 0 ]] && { ok "nenhum pacote pendente — host no ultimo minor"; return 0; }
+  [[ ${n:-0} -eq 0 ]] && { ok "nenhum pacote pendente — host no ultimo minor"; minor_target_report; return 0; }
   info "$n pacotes pendentes"
   if is_poweredge && [[ $(pve_major) -eq 9 ]]; then
     warn "PowerEdge + PVE 9: minors trazem kernel 6.17/7.0 — se o boot falhar,"
     warn "  volte com: proxmox-boot-tool kernel pin <versao 6.14>"
+    warn "  ATENCAO: pinar no 6.14 mantem o host ABAIXO do kernel 7.0."
   fi
   apt_dist_upgrade "minor PVE $(pve_major)"
+  minor_target_report
   reboot_pending && pause_reboot "Kernel novo instalado."
   ok "minor update concluido sem troca de kernel"
 }
@@ -984,7 +1045,12 @@ show_status() {
   head1 "Proximo passo"
   case "$(pve_major)" in
     6|7|8) log "  ./pve-upgrade.sh --assess (se ainda nao) -> --apply" ;;
-    9)     log "  ./pve-upgrade.sh --apply  (aplica minors: 9.0 -> 9.2)" ;;
+    9)
+      if ver_ge "$(pve_full)" "9.2"; then
+        log "  no 9.2 (kernel 7.0) — so minors de manutencao: --apply"
+      else
+        log "  ./pve-upgrade.sh --apply  (minors ate 9.2 / kernel 7.0)"
+      fi ;;
   esac
   state_tune_current || log "  ./proxmox_tune.sh  (tuning ausente para este kernel)"
 }
@@ -1017,7 +1083,7 @@ main() {
 
   local maj; maj=$(pve_major)
   if [[ $maj -ge $TARGET ]]; then
-    ok "PVE $maj ja atende o target $TARGET"
+    ok "major $maj ja atende o alvo $TARGET_FULL — verificando minors"
     phase_minor_update
     [[ $maj -eq 9 ]] && post_pve9_fixups
     show_status; exit 0
