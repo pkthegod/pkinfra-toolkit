@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# pve-upgrade.sh v3.3.0 — upgrade idempotente Proxmox VE 6 -> 7 -> 8 -> 9.2
+# pve-upgrade.sh v3.4.0 — upgrade idempotente Proxmox VE 6 -> 7 -> 8 -> 9.2
 #
 # Par de proxmox_tune.sh. Compartilham /var/lib/pve-maint (schema 1).
 #   upgrade = pontual (3-4x na vida do servidor), ABORTA em bloqueador
@@ -19,6 +19,10 @@
 # para. Os minors 9.0 -> 9.1 -> 9.2 (kernel 7.0) so vem rodando --apply DE
 # NOVO depois do reboot. "Cheguei ao PVE 9" nao e "cheguei ao 9.2".
 #
+# PORTAO: antes de CADA dist-upgrade, confere que o proxmox-ve tem
+#         candidato e que a simulacao nao o remove. Repo enterprise sem
+#         subscricao (401) e a causa mais comum de o salto 7->8 abortar.
+#
 # MODOS:  --assess  --validate  --status  --check
 # FLAGS:  --target N[.M]  --yes  --allow-ssh  --allow-console
 #         --skip-checker  --force-hw  --force-cgroup
@@ -36,7 +40,7 @@
 set -uo pipefail
 
 TOOL="pve-upgrade"
-VERSION="3.3.0"
+VERSION="3.4.0"
 
 # ==== BLOCO DE ESTADO COMPARTILHADO (schema 1) ==============================
 # IDENTICO em pve-upgrade.sh e proxmox_tune.sh.
@@ -161,7 +165,7 @@ while [[ $# -gt 0 ]]; do
           || { echo "--target invalido: '$TARGET_FULL' (use 7, 8, 9 ou 9.2)"; exit 2; }
         TARGET="${TARGET_FULL%%.*}"
         ;;
-    --help|-h)      sed -n '2,35p' "$0"; exit 0 ;;
+    --help|-h)      sed -n '2,39p' "$0"; exit 0 ;;
     *) echo "flag desconhecida: $1 (use --help)"; exit 2 ;;
   esac
   shift
@@ -771,8 +775,73 @@ EOF
 
 apt_refresh() { run apt-get update || die "apt update falhou — revise os repositorios"; }
 
+# Portao anti-remocao do meta-pacote proxmox-ve.
+#
+# Repo do PVE desalinhado do codinome, ou repo ENTERPRISE sem subscricao (que
+# responde 401), deixam 'proxmox-ve' sem candidato. O solver do apt entao
+# resolve as dependencias REMOVENDO o meta-pacote, e o pve-apt-hook aborta com
+# codigo 1 no meio do dist-upgrade — deixando o dpkg pela metade, que e o pior
+# estado possivel para um hypervisor.
+#
+# A mensagem do hook engana: diz que "voce esta tentando remover o proxmox-ve"
+# quando a remocao e CONSEQUENCIA da resolucao, nao pedido do operador. E o
+# 'touch /please-remove-proxmox-ve' que ela sugere nunca se aplica aqui: levaria
+# junto pve-manager, qemu-server, qm, pct e a interface web.
+#
+# Barrar antes custa dois comandos read-only. Descobrir depois custa o host.
+#
+# Roda TAMBEM em dry-run, de proposito: o valor do dry-run e justamente dizer
+# que o salto falharia, antes de voce abrir a janela de manutencao.
+apt_guard_proxmox_ve() {
+    command -v apt-cache >/dev/null 2>&1 || return 0
+    # host sem o meta-pacote (guest, ou PVE ainda nao instalado): nada a proteger
+    dpkg-query -W proxmox-ve >/dev/null 2>&1 || return 0
+
+    local cand flavor
+    cand=$(apt-cache policy proxmox-ve 2>/dev/null | awk '/Candidate:/{print $2}')
+    if [[ -z "$cand" || "$cand" == "(none)" ]]; then
+        flavor=$(repo_flavor)
+        err "proxmox-ve SEM CANDIDATO instalavel apos o apt update."
+        err "  prosseguir faria o apt propor a REMOCAO do meta-pacote."
+        if [[ "$flavor" == "enterprise" ]]; then
+            err "  o repo ativo e o ENTERPRISE, que exige subscricao valida."
+            err "  sem assinatura ele responde 401 e o candidato desaparece."
+            err "  para migrar este host ao repo publico:"
+            err "    sed -i -E 's|^deb|# deb|' /etc/apt/sources.list.d/pve-enterprise.list"
+            err "    echo 'deb http://download.proxmox.com/debian/pve $(deb_code) pve-no-subscription' > /etc/apt/sources.list.d/pve-no-subscription.list"
+            err "    apt-get update"
+        else
+            err "  confira se o repo do PVE aponta para o codinome '$(deb_code)':"
+            err "    grep -rE 'proxmox.com/debian/pve' /etc/apt/sources.list.d/"
+        fi
+        state_event "GUARD_NO_CANDIDATE" "deb=$(deb_code) flavor=$flavor"
+        die "abortando antes do dist-upgrade"
+    fi
+    ok "proxmox-ve candidato: $cand"
+
+    # Ter candidato nao basta: um conflito de dependencia ainda pode levar o
+    # solver a escolher a remocao. Simular e definitivo e nao custa nada.
+    local sim rc
+    sim=$(apt-get -s dist-upgrade 2>&1); rc=$?
+    if [[ $rc -ne 0 ]]; then
+        warn "a simulacao do dist-upgrade retornou $rc — apt em estado inconsistente?"
+        warn "  tente 'apt-get -f install' e rode de novo"
+    elif grep -qE '^Remv[[:space:]]+proxmox-ve\b' <<<"$sim"; then
+        err "a SIMULACAO do dist-upgrade REMOVE o proxmox-ve."
+        err "  isso destruiria o hypervisor: pve-manager, qemu-server, qm, pct, web."
+        err "  NAO use 'touch /please-remove-proxmox-ve' — a remocao nao e o objetivo."
+        err "  veja o que o apt pretende remover:"
+        err "    apt-get -s dist-upgrade | grep '^Remv'"
+        state_event "GUARD_WOULD_REMOVE" "deb=$(deb_code)"
+        die "abortando antes do dist-upgrade"
+    else
+        ok "simulacao nao remove proxmox-ve"
+    fi
+}
+
 apt_dist_upgrade() {
   local label="$1"
+  apt_guard_proxmox_ve
   info "dist-upgrade ($label) — 5 a 60min conforme o disco"
   if [[ $APPLY -eq 1 ]]; then
     DEBIAN_FRONTEND=noninteractive apt-get -y \

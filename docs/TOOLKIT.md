@@ -116,6 +116,18 @@ só vêm rodando `--apply` de novo depois do reboot. Desde a v3.3.0 o script
 reporta explicitamente se o alvo foi ou não alcançado, em vez de encerrar
 em silêncio no 9.0.
 
+**Portao anti-remocao do `proxmox-ve`.** Antes de **cada** `dist-upgrade`,
+o script confere que o `proxmox-ve` tem candidato instalável e que a
+simulação do `dist-upgrade` não o remove. Sem isso, repo do PVE
+desalinhado do codinome — ou repo **enterprise sem subscrição**, que
+responde 401 — deixa o meta-pacote sem candidato, o solver resolve
+removendo-o, e o `pve-apt-hook` aborta com código 1 **no meio** do
+`dist-upgrade`, com o dpkg pela metade. A mensagem do hook engana: a
+remoção é consequência da resolução, não pedido do operador — e o
+`touch /please-remove-proxmox-ve` que ela sugere levaria junto o
+`pve-manager`, o `qemu-server`, o `qm`/`pct` e a interface web. O portão
+roda também em dry-run, de propósito.
+
 **Os dois `--force` são coisas diferentes.** `--force-hw` ignora o veto de
 score do `--assess` e custa performance; `--force-cgroup` atropela o
 bloqueio de CT legado no 8→9 e o container **deixa de iniciar**. Eram uma
