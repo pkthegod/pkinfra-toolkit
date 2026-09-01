@@ -39,7 +39,7 @@ set -uo pipefail   # SEM '-e' de proposito: erros sao tratados por funcao.
 IFS=$'\n\t'
 
 readonly SCRIPT_NAME="proxmox_tune.sh"
-readonly SCRIPT_VERSION="3.1.0"
+readonly SCRIPT_VERSION="3.2.0"
 TOOL="proxmox-tune"
 VERSION="$SCRIPT_VERSION"
 

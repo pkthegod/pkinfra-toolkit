@@ -4,7 +4,7 @@
 set -uo pipefail
 
 FONTE="${1:?uso: testa-rank.sh <pve-upgrade.sh>}"
-RAIZ=$(mktemp -d); trap 'rm -rf "$RAIZ"' EXIT
+RAIZ=$(mktemp -d); trap 'rm -rf "${RAIZ:?}"' EXIT
 
 # Extrai as funcoes reais e reaponta os caminhos para a raiz falsa, para o
 # teste acompanhar o codigo em vez de reimplementa-lo.
@@ -16,7 +16,7 @@ extrai() {
 }
 
 monta() {   # <codinome do sistema> <linhas de repo...>
-  rm -rf "$RAIZ/etc"; mkdir -p "$RAIZ/etc/apt/sources.list.d"
+  rm -rf "${RAIZ:?}/etc"; mkdir -p "${RAIZ:?}/etc/apt/sources.list.d"
   printf 'VERSION_CODENAME=%s\n' "$1" > "$RAIZ/etc/os-release"
   shift
   : > "$RAIZ/etc/apt/sources.list"

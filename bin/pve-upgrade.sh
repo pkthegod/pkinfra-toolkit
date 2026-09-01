@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# pve-upgrade.sh v3.5.0 — upgrade idempotente Proxmox VE 6 -> 7 -> 8 -> 9.2
+# pve-upgrade.sh v3.6.0 — upgrade idempotente Proxmox VE 6 -> 7 -> 8 -> 9.2
 #
 # Par de proxmox_tune.sh. Compartilham /var/lib/pve-maint (schema 1).
 #   upgrade = pontual (3-4x na vida do servidor), ABORTA em bloqueador
@@ -44,7 +44,7 @@
 set -uo pipefail
 
 TOOL="pve-upgrade"
-VERSION="3.5.0"
+VERSION="3.6.0"
 
 # ==== BLOCO DE ESTADO COMPARTILHADO (schema 1) ==============================
 # IDENTICO em pve-upgrade.sh e proxmox_tune.sh.
