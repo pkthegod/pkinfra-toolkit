@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# pve-upgrade.sh v3.4.0 — upgrade idempotente Proxmox VE 6 -> 7 -> 8 -> 9.2
+# pve-upgrade.sh v3.5.0 — upgrade idempotente Proxmox VE 6 -> 7 -> 8 -> 9.2
 #
 # Par de proxmox_tune.sh. Compartilham /var/lib/pve-maint (schema 1).
 #   upgrade = pontual (3-4x na vida do servidor), ABORTA em bloqueador
@@ -25,7 +25,11 @@
 #
 # MODOS:  --assess  --validate  --status  --check
 # FLAGS:  --target N[.M]  --yes  --allow-ssh  --allow-console
-#         --skip-checker  --force-hw  --force-cgroup
+#         --skip-checker  --no-checker  --checker-timeout N
+#         --force-hw  --force-cgroup  --keep-enterprise
+#
+# --skip-checker IGNORA falhas do pveNtoN+1, mas ele ainda RODA.
+# --no-checker   nao roda o checador. E o que resolve travamento nele.
 #
 # OS DOIS --force NAO SAO A MESMA COISA:
 #   --force-hw      ignora o veto de score do --assess. Custa PERFORMANCE.
@@ -40,7 +44,7 @@
 set -uo pipefail
 
 TOOL="pve-upgrade"
-VERSION="3.4.0"
+VERSION="3.5.0"
 
 # ==== BLOCO DE ESTADO COMPARTILHADO (schema 1) ==============================
 # IDENTICO em pve-upgrade.sh e proxmox_tune.sh.
@@ -141,6 +145,7 @@ RUN_LOG="$STATE_ROOT/run-upgrade-$(date +%Y%m%d-%H%M%S).log"
 
 APPLY=0; ASSUME_YES=0; ALLOW_SSH=0; SKIP_CHECKER=0; ALLOW_CONSOLE=0
 FORCE_HW=0; FORCE_CGROUP=0
+NO_CHECKER=0; KEEP_ENTERPRISE=0; CHECKER_TIMEOUT=600
 # TARGET_FULL pode ter minor ("9.2"); TARGET e so o major, usado no despacho
 # de fase. A separacao nao e cosmetica: [[ 9 -ge 9.2 ]] aborta o script porque
 # o bash trata como aritmetica e "9.2" nao e inteiro valido.
@@ -157,6 +162,14 @@ while [[ $# -gt 0 ]]; do
     --allow-ssh)     ALLOW_SSH=1 ;;
     --allow-console) ALLOW_CONSOLE=1 ;;
     --skip-checker) SKIP_CHECKER=1 ;;
+    --no-checker)   NO_CHECKER=1 ;;
+    --keep-enterprise) KEEP_ENTERPRISE=1 ;;
+    --checker-timeout)
+        CHECKER_TIMEOUT="${2:-600}"; shift
+        if [[ ! "$CHECKER_TIMEOUT" =~ ^[0-9]+$ ]]; then
+          echo "--checker-timeout precisa ser numero de segundos"; exit 2
+        fi
+        ;;
     --force-hw)     FORCE_HW=1 ;;
     --force-cgroup) FORCE_CGROUP=1 ;;
     --target)
@@ -165,7 +178,7 @@ while [[ $# -gt 0 ]]; do
           || { echo "--target invalido: '$TARGET_FULL' (use 7, 8, 9 ou 9.2)"; exit 2; }
         TARGET="${TARGET_FULL%%.*}"
         ;;
-    --help|-h)      sed -n '2,39p' "$0"; exit 0 ;;
+    --help|-h)      sed -n '2,43p' "$0"; exit 0 ;;
     *) echo "flag desconhecida: $1 (use --help)"; exit 2 ;;
   esac
   shift
@@ -216,6 +229,13 @@ pve_major() {
 }
 pve_full()   { pveversion 2>/dev/null | head -1 | grep -oP 'pve-manager/\K[^ /]+'; }
 deb_code()   { . /etc/os-release 2>/dev/null; echo "${VERSION_CODENAME:-unknown}"; }
+# Codinome que os REPOSITORIOS servem — nao confundir com o do sistema.
+# Divergencia entre os dois e a assinatura de um salto que morreu no meio.
+repo_codename() {
+    grep -rhoE '\b(buster|bullseye|bookworm|trixie)\b' \
+         /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null \
+      | sort -u | tail -1
+}
 ver_ge()     { dpkg --compare-versions "$1" ge "$2"; }
 has_ceph()   { [[ -f /etc/pve/ceph.conf ]] || command -v ceph >/dev/null 2>&1; }
 is_uefi()    { [[ -d /sys/firmware/efi ]]; }
@@ -773,6 +793,84 @@ EOF
 
 # ------------------------------------------------------------ apt
 
+
+# Garante repo do PVE servindo o codinome ATUAL, antes de subir ao ultimo minor.
+#
+# O salto exige chegar ao ultimo minor da serie (7.4-15 para ir ao 8). Isso so
+# acontece se houver repo do PVE servindo o codinome em que o host esta HOJE.
+# Host instalado por ISO vem so com o pve-enterprise, que sem subscricao
+# responde 401: o dist-upgrade nao traz nada, a versao nao sobe, e o salto
+# morre no ver_ge dizendo "a doc exige 7.4-15" — sem em momento algum dizer
+# que a causa e o repositorio. Era o erro mais caro de diagnosticar do script.
+repos_ensure_pve_current() {
+    local code; code=$(deb_code)
+    case "$code" in
+        bullseye|bookworm|trixie) ;;
+        *) info "codinome '$code' fora do escopo (buster usa archive)"; return 0 ;;
+    esac
+
+    # Verdade de campo: existe candidato instalavel? Nao adianta procurar a
+    # linha do repo — ela pode existir e o repo estar respondendo 401.
+    run apt-get update >/dev/null 2>&1 || true
+    local cand
+    cand=$(apt-cache policy proxmox-ve 2>/dev/null | awk '/Candidate:/{print $2}')
+    if [[ -n "$cand" && "$cand" != "(none)" ]]; then
+        ok "repo do PVE serve '$code' (candidato $cand)"
+        return 0
+    fi
+
+    warn "sem candidato para proxmox-ve em '$code'"
+    warn "  sem corrigir, o host NAO chega ao ultimo minor e o salto aborta"
+
+    local flavor; flavor=$(repo_flavor)
+    if [[ "$flavor" == "enterprise" ]]; then
+        warn "repo ENTERPRISE ativo, sem subscricao valida (responde 401)"
+        if [[ $KEEP_ENTERPRISE -eq 1 ]]; then
+            err "--keep-enterprise pedido: nao vou mexer nos repositorios."
+            die "corrija a subscricao, ou rode sem --keep-enterprise"
+        fi
+        local f
+        for f in /etc/apt/sources.list.d/pve-enterprise.list \
+                 /etc/apt/sources.list.d/pve-enterprise.sources; do
+            [[ -f "$f" ]] || continue
+            backup_file "$f"
+            if [[ "$f" == *.sources ]]; then
+                # deb822: comentar a linha gera stanza malformada. O
+                # desligamento suportado e a chave Enabled.
+                if grep -qE '^[[:space:]]*Enabled:' "$f"; then
+                    run sed -i -E 's|^[[:space:]]*Enabled:.*|Enabled: false|' "$f"
+                elif [[ $APPLY -eq 1 ]]; then
+                    printf 'Enabled: false\n' >> "$f"
+                else
+                    log "   ${C_Y}[dry]${C_0} echo 'Enabled: false' >> $f"
+                fi
+            else
+                run sed -i -E 's|^[[:space:]]*deb|# deb|' "$f"
+            fi
+            warn "desativado: $f"
+            warn "  se a subscricao voltar, reative e remova o repo publico"
+        done
+    fi
+
+    local linha="deb http://download.proxmox.com/debian/pve ${code} pve-no-subscription"
+    local alvo=/etc/apt/sources.list.d/pve-no-subscription.list
+    if [[ $APPLY -eq 1 ]]; then
+        printf '%s\n' "$linha" > "$alvo"
+    else
+        log "   ${C_Y}[dry]${C_0} echo '$linha' > $alvo"
+    fi
+    ok "repo publico adicionado para '$code'"
+    state_event "REPO_PVE_ADDED" "$code no-subscription (era $flavor)"
+
+    apt_refresh
+    cand=$(apt-cache policy proxmox-ve 2>/dev/null | awk '/Candidate:/{print $2}')
+    if [[ $APPLY -eq 1 && ( -z "$cand" || "$cand" == "(none)" ) ]]; then
+        die "ainda sem candidato apos adicionar o repo publico — revise a rede/DNS"
+    fi
+    [[ -n "$cand" && "$cand" != "(none)" ]] && ok "candidato agora: $cand"
+    return 0
+}
+
 apt_refresh() { run apt-get update || die "apt update falhou — revise os repositorios"; }
 
 # Portao anti-remocao do meta-pacote proxmox-ve.
@@ -792,6 +890,14 @@ apt_refresh() { run apt-get update || die "apt update falhou — revise os repos
 #
 # Roda TAMBEM em dry-run, de proposito: o valor do dry-run e justamente dizer
 # que o salto falharia, antes de voce abrir a janela de manutencao.
+# Em --apply o portao mata. Em dry-run ele avisa e deixa o plano seguir:
+# um dry-run so vale se mostrar o roteiro inteiro, inclusive o que quebraria.
+guard_stop() {
+    [[ $APPLY -eq 1 ]] && die "$1"
+    warn "[dry-run] em --apply isto ABORTARIA: $1"
+    return 0
+}
+
 apt_guard_proxmox_ve() {
     command -v apt-cache >/dev/null 2>&1 || return 0
     # host sem o meta-pacote (guest, ou PVE ainda nao instalado): nada a proteger
@@ -815,7 +921,8 @@ apt_guard_proxmox_ve() {
             err "    grep -rE 'proxmox.com/debian/pve' /etc/apt/sources.list.d/"
         fi
         state_event "GUARD_NO_CANDIDATE" "deb=$(deb_code) flavor=$flavor"
-        die "abortando antes do dist-upgrade"
+        guard_stop "abortando antes do dist-upgrade"
+        return 0
     fi
     ok "proxmox-ve candidato: $cand"
 
@@ -833,7 +940,7 @@ apt_guard_proxmox_ve() {
         err "  veja o que o apt pretende remover:"
         err "    apt-get -s dist-upgrade | grep '^Remv'"
         state_event "GUARD_WOULD_REMOVE" "deb=$(deb_code)"
-        die "abortando antes do dist-upgrade"
+        guard_stop "abortando antes do dist-upgrade"
     else
         ok "simulacao nao remove proxmox-ve"
     fi
@@ -869,18 +976,52 @@ report_conffiles() {
 
 run_checker() {
   local tool="$1"
+
+  if [[ $NO_CHECKER -eq 1 ]]; then
+    warn "--no-checker: $tool NAO foi executado [PERIGOSO]"
+    warn "  o checador oficial cobre repos, espaco, kernel e config incompativel"
+    state_event "CHECKER_SKIPPED" "$tool"
+    return 0
+  fi
+
   head1 "Checagem: $tool --full"
   command -v "$tool" >/dev/null || die "$tool nao encontrado"
-  local out; out=$("$tool" --full 2>&1)
-  echo "$out" | tee -a "$RUN_LOG"
+
+  # timeout + saida em PIPE, nunca em $( ).
+  #
+  # O checador faz consultas de rede aos repositorios. Com repo inacessivel
+  # (enterprise 401, mirror mudo, DNS quebrado) ele bloqueia na conexao. Em
+  # command substitution isso congelava o script SEM IMPRIMIR NADA — a saida
+  # so apareceria no fim, que nunca chegava. Era o "trava sem erro".
+  #
+  # Aqui a saida vai para a tela enquanto roda, e o timeout garante que uma
+  # trava vire mensagem em vez de espera infinita.
+  local tmp rc
+  tmp=$(mktemp) || die "mktemp falhou"
+  timeout "${CHECKER_TIMEOUT}" "$tool" --full 2>&1 | tee -a "$RUN_LOG" "$tmp"
+  rc=${PIPESTATUS[0]}
+
+  if [[ $rc -eq 124 ]]; then
+    rm -f "$tmp"
+    err "$tool nao terminou em ${CHECKER_TIMEOUT}s — interrompido."
+    err "  causa tipica: repositorio inacessivel; o checador trava na conexao."
+    err "  confira:  apt-get update"
+    err "  ou pule:  --no-checker   (e assuma o risco de nao ter checado)"
+    err "  ou estenda: --checker-timeout <segundos>"
+    state_event "CHECKER_TIMEOUT" "$tool ${CHECKER_TIMEOUT}s"
+    die "checagem travada"
+  fi
+
   local fails warns
-  fails=$(grep -ciE '^\s*FAIL' <<<"$out" || true)
-  warns=$(grep -ciE '^\s*WARN' <<<"$out" || true)
-  state_event "CHECKER" "$tool fail=$fails warn=$warns"
+  fails=$(grep -ciE '^\s*FAIL' "$tmp" || true)
+  warns=$(grep -ciE '^\s*WARN' "$tmp" || true)
+  rm -f "$tmp"
+  state_event "CHECKER" "$tool fail=$fails warn=$warns rc=$rc"
+
   if [[ ${fails:-0} -gt 0 ]]; then
     err "$fails FAILURES"
     [[ $SKIP_CHECKER -eq 1 ]] && warn "--skip-checker: prosseguindo [PERIGOSO]" \
-      || die "corrija as falhas e rode de novo"
+      || die "corrija as falhas e rode de novo (ou --skip-checker)"
   fi
   [[ ${warns:-0} -gt 0 ]] && warn "$warns warnings — revise acima"
   ok "$tool sem falhas bloqueantes"
@@ -920,7 +1061,7 @@ phase_6_to_7() {
 
 phase_7_to_8() {
   head1 "FASE 50 — PVE 7.x -> 8"
-  strip_backports; apt_refresh; apt_dist_upgrade "7.x -> 7.4"
+  strip_backports; repos_ensure_pve_current; apt_refresh; apt_dist_upgrade "7.x -> 7.4"
   ver_ge "$(pve_full)" "7.4-15" || die "$(pve_full): a doc exige 7.4-15+"
   run_checker pve7to8
   if has_ceph; then
@@ -939,7 +1080,7 @@ phase_7_to_8() {
 
 phase_8_to_9() {
   head1 "FASE 70 — PVE 8.x -> 9"
-  strip_backports; apt_refresh; apt_dist_upgrade "8.x -> 8.4"
+  strip_backports; repos_ensure_pve_current; apt_refresh; apt_dist_upgrade "8.x -> 8.4"
   ver_ge "$(pve_full)" "8.4.1" || die "$(pve_full) — a doc exige 8.4.1+ antes do 9"
 
   local bad; bad=$(cgroupv1_cts)
@@ -1148,6 +1289,25 @@ main() {
     warn "kernel novo instalado mas nao em uso"
     confirm "seguir mesmo assim? (recomendado: reboot antes)" \
       || die "reinicie, rode --validate e depois --apply"
+  fi
+
+  # RETOMADA. Os repos ja apontam para o codinome novo mas o sistema ainda
+  # esta no antigo: um salto anterior parou depois de trocar os repositorios.
+  # Reentrar pela fase do inicio tentaria subir ao ultimo minor da serie
+  # ANTIGA usando repositorio da NOVA — incoerente, e a causa de o script
+  # "nao ser idempotente" na pratica. O detector ja existia; nao estava ligado.
+  if state_upgrade_inflight; then
+    local rc_repo rc_sys
+    rc_repo=$(repo_codename); rc_sys=$(deb_code)
+    warn "UPGRADE EM VOO: repos em '$rc_repo', sistema em '$rc_sys'"
+    warn "  um salto anterior parou DEPOIS de trocar os repositorios."
+    warn "  retomando o dist-upgrade; nao repito a subida de minor."
+    state_event "RESUME_INFLIGHT" "repo=$rc_repo sys=$rc_sys"
+    apt_refresh
+    apt_dist_upgrade "retomada: $rc_sys -> $rc_repo"
+    [[ "$rc_repo" == "trixie" ]] && post_pve9_fixups
+    report_conffiles
+    pause_reboot "Retomada concluida ($rc_sys -> $rc_repo)."
   fi
 
   local maj; maj=$(pve_major)
