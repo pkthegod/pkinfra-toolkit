@@ -46,7 +46,7 @@ VERSION="$SCRIPT_VERSION"
 # ==== BLOCO DE ESTADO COMPARTILHADO (schema 1) ==============================
 # IDENTICO em pve-upgrade.sh e proxmox_tune.sh.
 # Ao alterar, altere nos DOIS e incremente STATE_SCHEMA.
-STATE_SCHEMA=1
+STATE_SCHEMA=2
 STATE_ROOT="/var/lib/pve-maint"
 STATE_LEGACY="/var/lib/pve-upgrade"
 EVENT_LOG="$STATE_ROOT/events.log"
@@ -109,14 +109,59 @@ state_facts_read() { [[ -f "$FACTS_FILE" ]] && . "$FACTS_FILE" 2>/dev/null || tr
 # Existe tuning aplicado e valido para o kernel que esta rodando agora?
 state_tune_current() { [[ -f "$TUNE_DIR/state-$(uname -r).env" ]]; }
 
-# Repos apontam para codename diferente do sistema? = upgrade em voo
+# Ordem de RELEASE dos codinomes. Ordenar por alfabeto era o bug: bullseye
+# vem depois de bookworm no dicionario, mas bookworm e a release mais nova.
+deb_rank() {
+    case "${1:-}" in
+        buster)   echo 10 ;;
+        bullseye) echo 11 ;;
+        bookworm) echo 12 ;;
+        trixie)   echo 13 ;;
+        *)        echo 0  ;;
+    esac
+}
+
+# Codinomes citados pelos repositorios, um por linha, sem repetir.
+repo_codenames() {
+    grep -rhoE '\b(buster|bullseye|bookworm|trixie)\b' \
+         /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null | sort -u
+}
+
+# O codinome mais novo citado — por release, nunca por alfabeto.
+repo_codename_newest() {
+    local c best="" bestr=0 r
+    while read -r c; do
+        [[ -z "$c" ]] && continue
+        r=$(deb_rank "$c")
+        [[ $r -gt $bestr ]] && { bestr=$r; best="$c"; }
+    done < <(repo_codenames)
+    echo "$best"
+}
+
+# Codinomes ANTERIORES ao do sistema ainda presentes nos repos. Nao e upgrade
+# em voo: e residuo do salto anterior. Confunde o apt e confunde o operador,
+# mas tratar como "upgrade em andamento" e o que travava o tuning.
+repo_codenames_stale() {
+    local sys c out="" rsys
+    sys=$(. /etc/os-release 2>/dev/null; echo "${VERSION_CODENAME:-}")
+    [[ -z "$sys" ]] && return 0
+    rsys=$(deb_rank "$sys")
+    while read -r c; do
+        [[ -z "$c" ]] && continue
+        [[ $(deb_rank "$c") -lt $rsys ]] && out="$out $c"
+    done < <(repo_codenames)
+    echo "${out# }"
+}
+
+# Upgrade EM VOO = os repos ja apontam para release MAIS NOVA que a do
+# sistema. Direcional de proposito: repo mais VELHO que o sistema e residuo,
+# e residuo nao se "retoma" — se limpa.
 state_upgrade_inflight() {
-    local running repo
+    local running newest
     running=$(. /etc/os-release 2>/dev/null; echo "${VERSION_CODENAME:-}")
-    repo=$(grep -rhoE '\b(buster|bullseye|bookworm|trixie)\b' \
-           /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null \
-           | sort -u | tail -1)
-    [[ -n "$repo" && -n "$running" && "$repo" != "$running" ]]
+    newest=$(repo_codename_newest)
+    [[ -n "$newest" && -n "$running" ]] || return 1
+    [[ $(deb_rank "$newest") -gt $(deb_rank "$running") ]]
 }
 
 # Sobe a arvore de processos procurando um ancestral. Preciso: nao usa
