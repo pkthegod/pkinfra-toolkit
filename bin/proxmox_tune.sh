@@ -462,7 +462,7 @@ detect_firewall() {
     if [[ ! -d /etc/pve ]]; then
         PVE_FW="na"; PVE_FW_REASON="sem /etc/pve (host KVM generico)"
         _log INFO "Firewall: ${PVE_FW_REASON} — bridge-nf e conntrack nao sao tocados"
-    elif pve_fw_enabled; then
+    elif pve_fw_enabled "$PVE_FW_CLUSTER"; then
         PVE_FW="on"; PVE_FW_REASON="cluster.fw com enable: 1"
         _log INFO "Firewall do PVE ATIVO (${PVE_FW_REASON})"
         _log INFO "  bridge-nf-call-*, nf_conntrack_max e timeout established ficam com"
