@@ -46,7 +46,7 @@ set -uo pipefail
 TOOL="pve-upgrade"
 VERSION="3.6.0"
 
-# ==== BLOCO DE ESTADO COMPARTILHADO (schema 1) ==============================
+# ==== BLOCO DE ESTADO COMPARTILHADO (schema 2) ==============================
 # IDENTICO em pve-upgrade.sh e proxmox_tune.sh.
 # Ao alterar, altere nos DOIS e incremente STATE_SCHEMA.
 STATE_SCHEMA=2
@@ -90,20 +90,24 @@ state_facts_write() {
     prod=$(cat /sys/class/dmi/id/product_name 2>/dev/null || echo unknown)
     pve=$(pveversion 2>/dev/null | head -1 | grep -oP 'pve-manager/\K[^ /]+')
     deb=$(. /etc/os-release 2>/dev/null; echo "${VERSION_CODENAME:-unknown}")
+    # Aspas em TODO valor (bug 3): 'Intel(R)' sem aspas e erro de sintaxe no
+    # source, e todas as chaves seguintes chegam vazias. O que poderia fechar
+    # ou expandir dentro das aspas duplas sai antes.
+    cpu=${cpu//[\"\\$\`]/}; prod=${prod//[\"\\$\`]/}
 
     cat > "$FACTS_FILE" <<FACTS
 # gerado por ${TOOL} v${VERSION} em $(date -Is)
-FACT_HOST=$(hostname)
-FACT_PRODUCT=${prod}
-FACT_CPU=${cpu}
-FACT_CORES=${cores}
-FACT_RAM_MB=${ram}
-FACT_NUMA_NODES=${numa}
-FACT_PCID=${pcid}
-FACT_AES=${aes}
-FACT_KERNEL=$(uname -r)
-FACT_PVE=${pve:-desconhecido}
-FACT_DEBIAN=${deb}
+FACT_HOST="$(hostname)"
+FACT_PRODUCT="${prod}"
+FACT_CPU="${cpu}"
+FACT_CORES="${cores}"
+FACT_RAM_MB="${ram}"
+FACT_NUMA_NODES="${numa}"
+FACT_PCID="${pcid}"
+FACT_AES="${aes}"
+FACT_KERNEL="$(uname -r)"
+FACT_PVE="${pve:-desconhecido}"
+FACT_DEBIAN="${deb}"
 FACTS
 }
 

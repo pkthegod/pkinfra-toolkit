@@ -33,8 +33,8 @@ janelas curtas. Tudo precisa ser idempotente e reversível.
 | Script | Ver. | Papel | Onde roda |
 |---|---|---|---|
 | `pkops.sh` | 1.0 | Estado, eventos, callbacks, manifest, drift | Todos |
-| `pve-upgrade.sh` | 3.2.0 | Upgrade PVE 6→7→8→9 | Host PVE |
-| `proxmox_tune.sh` | 3.1.0 | Tuning do host PVE | Host PVE |
+| `pve-upgrade.sh` | 3.6.0 | Upgrade PVE 6→7→8→9 | Host PVE |
+| `proxmox_tune.sh` | 3.3.0 | Tuning do host PVE | Host PVE |
 | `tune-profile.sh` | 1.0 | Tuning de guest por perfil de carga | VM/LXC/bare-metal |
 | `setup-unbound.sh` | 2.0 | Resolvedor recursivo validante | VM DNS |
 | `validate.sh` | 2.0 | Validação **e teste** de runtime (`--deep`, `--json`, `--report`) | Todos |
@@ -426,7 +426,7 @@ histórico auditável de graça (`git log -p manifest.md`).
 ## 5. Catálogo de bugs — lista anti-regressão
 
 **Esta é a seção mais importante do documento.** Cada item foi encontrado e
-corrigido; reintroduzir qualquer um é regressão. **29 itens.**
+corrigido; reintroduzir qualquer um é regressão. **33 itens.**
 
 ### 5.1 Falhas silenciosas (as piores)
 
@@ -434,7 +434,10 @@ corrigido; reintroduzir qualquer um é regressão. **29 itens.**
 |---|---|---|---|
 | 1 | `cat > /etc/unbound/unbound.conf` apaga o `include` do `conf.d/` | DNSSEC **não valida**, sem erro visível | escrever em `conf.d/`, nunca no arquivo do pacote |
 | 2 | `\$2` escapado dentro de aspas simples em `$( )` num heredoc | `awk: unexpected character '\'` | calcular em variáveis **antes** do heredoc |
-| 3 | `facts.env` sem aspas nos valores | `Intel(R)` é erro de sintaxe; o `source` aborta e todas as chaves seguintes ficam vazias | aspas obrigatórias em todo `.env` gerado |
+| 3 | `facts.env` sem aspas nos valores | `Intel(R)` é erro de sintaxe; o `source` aborta e todas as chaves seguintes ficam vazias | aspas obrigatórias em todo `.env` gerado. **Reincidiu** até a 3.2.0 no bloco compartilhado e no `state-<kernel>.env`; agora preso por `test_proxmox_tune.py` |
+| 30 | `bridge-nf-call-iptables = 1` fixo no tuning do host | todo pacote bridgeado de VM atravessa iptables + conntrack do host, mesmo sem firewall; sobrescrevia o `0` do próprio PVE | detectar `enable: 1` no `cluster.fw`; sem firewall `0` e sem `br_netfilter`, com firewall deixar com o `pve-firewall` |
+| 31 | `nf_conntrack_tcp_timeout_established = 300` | com o firewall do PVE, conexão ociosa de VM vira INVALID depois de 5 min e é descartada sem log | default do kernel; com firewall, max/timeout são do `host.fw` |
+| 32 | `zfs_arc_max` ≤ `zfs_arc_min` | o ZFS ignora o teto sem erro; o parâmetro lê de volta o valor escrito, então parece aplicado | baixar o `zfs_arc_min` antes, conferir no `c_max` do `arcstats` |
 | 4 | `dig ... > /dev/null` como teste de resolução | retorna 0 mesmo com resposta vazia/NXDOMAIN | checar conteúdo: `[[ -n "$(dig +short)" ]]` |
 | 5 | Zabbix `ConfigFrequency` (depreciada no 6.4) | o `sed` não casa, você acha que configurou | usar `ProxyConfigFrequency` no 7.0 |
 | 6 | `nf_conntrack_buckets` via sysctl | read-only após carregar o módulo; falha calada | `options nf_conntrack hashsize=N` em `modprobe.d` |
@@ -461,6 +464,7 @@ corrigido; reintroduzir qualquer um é regressão. **29 itens.**
 | 16 | `fs.inotify.max_user_instances = 128` (default) | ~10 containers e acabou; erro aparece como `ENOSPC` com disco sobrando |
 | 17 | Docker `json-file` sem rotação | enche 32 GB em semanas; `max-size` + `max-file` |
 | 18 | Slabs do Unbound não potência de 2 | exigência do software |
+| 33 | Pool de hugepages sem VM consumidora e sem descontar o ARC | RAM travada que nem VM comum, nem KSM, nem ARC usam; hugepages + ARC podiam deixar o host sem piso. Contar `hugepages:` nas VMs e somar o ARC ao piso |
 
 ### 5.4 Detecção e falso positivo
 

@@ -2,7 +2,7 @@
 
 Ferramentas de upgrade, tuning e validação para frota Debian / Proxmox VE.
 
-**Versão do pacote:** 2026.09.01
+**Versão do pacote:** 2026.09.26
 
 ---
 
@@ -22,7 +22,7 @@ chama o `install.sh` de dentro do pacote. Flags passam direto:
 curl -fsSL .../bootstrap.sh | sudo bash -s -- --dry-run
 
 # versão fixa + digest fixo — é assim que se instala em produção
-curl -fsSL .../bootstrap.sh | sudo bash -s -- --version 2026.09.01 --sha256 <hash>
+curl -fsSL .../bootstrap.sh | sudo bash -s -- --version 2026.09.26 --sha256 <hash>
 
 # forçar tudo, independente do papel do host
 curl -fsSL .../bootstrap.sh | sudo bash -s -- --all
@@ -40,8 +40,8 @@ curl -fsSL .../bootstrap.sh | sudo bash -s -- --all
 > que pode ter mudado desde a última vez. Para produção, aponte para a tag:
 >
 > ```bash
-> curl -fsSL https://raw.githubusercontent.com/pkthegod/pkinfra-toolkit/v2026.09.01/bootstrap.sh \
->   | sudo bash -s -- --version 2026.09.01 --sha256 <hash>
+> curl -fsSL https://raw.githubusercontent.com/pkthegod/pkinfra-toolkit/v2026.09.26/bootstrap.sh \
+>   | sudo bash -s -- --version 2026.09.26 --sha256 <hash>
 > ```
 >
 > Assim as duas metades ficam pinadas: o instalador pela tag, o pacote pelo
@@ -50,7 +50,7 @@ curl -fsSL .../bootstrap.sh | sudo bash -s -- --all
 ### Manual (tarball do release)
 
 ```bash
-V=2026.09.01
+V=2026.09.26
 curl -fsSLO https://github.com/pkthegod/pkinfra-toolkit/releases/download/v$V/pkinfra-toolkit-$V.tar.gz
 curl -fsSLO https://github.com/pkthegod/pkinfra-toolkit/releases/download/v$V/pkinfra-toolkit-$V.tar.gz.sha256
 sha256sum -c pkinfra-toolkit-$V.tar.gz.sha256
@@ -83,7 +83,7 @@ done
 | `bin/pkassess.sh` | 1.0 | **levantamento, benchmark e prescricao — comece aqui** |
 | `lib/pkops.sh` | 1.0 | estado, eventos, callbacks, manifest, drift |
 | `bin/pve-upgrade.sh` | 3.6.0 | upgrade PVE 6→7→8→9.2 |
-| `bin/proxmox_tune.sh` | 3.2.0 | tuning do host PVE |
+| `bin/proxmox_tune.sh` | 3.3.0 | tuning do host PVE — **hipervisor-aware** (firewall, ARC, hugepages) |
 | `bin/tune-profile.sh` | 1.0 | tuning de guest — 8 perfis de carga |
 | `bin/setup-unbound.sh` | 2.0 | resolvedor recursivo validante |
 | `bin/validate.sh` | 2.1 | **valida e testa** o runtime — RED/GREEN, `--deep`, `--json`, `--report` |
@@ -93,6 +93,37 @@ done
 
 Após instalar, tudo fica em `/usr/local/sbin/` e a referência em
 `/usr/local/share/pkinfra/TOOLKIT.md`.
+
+---
+
+## Novidades — 2026.09.26
+
+### `proxmox_tune.sh` 3.3.0 — o host tunado como hipervisor
+
+A v3.2 tunava o host PVE como um servidor Linux qualquer. Parte do que ela
+fazia custava desempenho às VMs ou falhava sem avisar. Esta versão corrige
+isso:
+
+| # | Antes | Agora | Ganho |
+|---|---|---|---|
+| 1 | `bridge-nf-call-iptables = 1` sempre, `br_netfilter` sempre carregado | Detecta o firewall do PVE (`cluster.fw`). **Desligado:** `0` e sem `br_netfilter`. **Ligado:** as chaves ficam com o `pve-firewall` | Sem firewall, o tráfego bridgeado das VMs deixa de passar pelo iptables e pelo conntrack do host: menos CPU por pacote |
+| 2 | `nf_conntrack_tcp_timeout_established = 300` | Default do kernel (5 dias). Com o firewall ligado, `nf_conntrack_max` e esse timeout ficam no `host.fw` | Conexão ociosa de VM (SSH, pool de banco) não morre mais calada depois de 5 min |
+| 3 | `--zfs-arc N` abaixo do `zfs_arc_min` era **ignorado** pelo ZFS sem erro (piso default = RAM/32) | Baixa o `zfs_arc_min` junto, grava os dois no `modprobe.d` e confere o `c_max` no `arcstats` | O teto do ARC passa a valer de fato, e a RAM volta para as VMs |
+| 4 | `--hugepages` reservava mesmo sem VM consumidora e ignorava o ARC no piso do host | Conta as VMs com `hugepages:` e **recusa** pool sem consumidor (`--force` passa por cima). O ARC entra no piso de 8 GB. Avisa sobre tamanho divergente e sobre balloon junto com hugepages | RAM deixa de ficar travada num pool ocioso e o host não fica sem memória |
+| 5 | Só páginas de 2 MB | `--hugepages-size 1G`, com checagem da flag `pdpe1gb` | Menos TLB miss em VM grande (banco, NoSQL) |
+| 6 | `facts.env` e `state-<kernel>.env` sem aspas: `Intel(R)` quebrava o `source` (bug 3 de volta) | Todo valor entre aspas | `pve-upgrade.sh --validate` volta a ler o estado do tuning |
+| 7 | Checagem de colisão só em `/etc/sysctl.d` | Também em `/run`, `/usr/local/lib` e `/usr/lib/sysctl.d`, onde os pacotes põem os deles | Um conflito com o sysctl do próprio PVE aparece no relatório |
+| 8 | Mudar a RAM ou o firewall não refazia o tuning | Os dois entram na assinatura do estado | Cruzar 32 GB (`dirty_ratio` → `dirty_bytes`) ou ligar o firewall re-tuna sozinho |
+
+```bash
+proxmox_tune.sh --dry-run --tune-only            # mostra a decisão do firewall
+proxmox_tune.sh --zfs-arc 8                      # agora confere se pegou
+proxmox_tune.sh --hugepages 32 --hugepages-size 1G
+```
+
+> **Ao ligar ou desligar o firewall do datacenter, rode o tuning de novo.**
+> A decisão sobre `bridge-nf-call-*` depende dele, e a assinatura detecta a
+> mudança.
 
 ---
 
@@ -297,7 +328,7 @@ manifest, histórico git) e `/etc/pkops/hooks.d`.
 
 ## Antes de modificar
 
-Leia a **seção 5 do `TOOLKIT.md`** — catálogo de 29 bugs encontrados e
+Leia a **seção 5 do `TOOLKIT.md`** — catálogo de 33 bugs encontrados e
 corrigidos. Vários são falhas silenciosas: o script "funciona" e o efeito
 não existe. Reintroduzir qualquer um é regressão.
 
@@ -318,8 +349,8 @@ normalizado para LF. O mesmo commit gera **o mesmo `.tar` byte a byte em
 qualquer host**, e é isso que permite conferir um release contra o código:
 
 ```bash
-git checkout v2026.09.01 && ./build.sh
-# compare dist/pkinfra-toolkit-2026.09.01.tar.sha256 com o publicado no release
+git checkout v2026.09.26 && ./build.sh
+# compare dist/pkinfra-toolkit-2026.09.26.tar.sha256 com o publicado no release
 ```
 
 O digest do **`.tar.gz`** não atravessa hosts: a saída do gzip varia entre
@@ -331,9 +362,9 @@ fazer.
 **Para publicar uma versão:**
 
 ```bash
-echo 2026.09.01 > VERSION
-git commit -am "release: 2026.09.01"
-git tag v2026.09.01
+echo 2026.09.26 > VERSION
+git commit -am "release: 2026.09.26"
+git tag v2026.09.26
 git push origin main --tags     # o CI monta, verifica e publica o release
 ```
 

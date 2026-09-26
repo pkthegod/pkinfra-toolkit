@@ -1,12 +1,27 @@
 #!/usr/bin/env bash
 # =============================================================================
-# proxmox_tune.sh — v3.0
+# proxmox_tune.sh — v3.3
 # Update/upgrade seguro + tuning de host Proxmox VE 6/7/8/9
 # (Debian 10 "buster" -> Debian 13 "trixie", kernels 5.3 -> 7.0+)
 #
-# Par de pve-upgrade.sh. Compartilham /var/lib/pve-maint (schema 1).
+# Par de pve-upgrade.sh. Compartilham /var/lib/pve-maint (schema 2).
 #   upgrade = pontual, ABORTA em bloqueador
 #   tuning  = recorrente (a cada kernel novo), NUNCA aborta por chave
+#
+# NOVIDADES DA v3.3 (o host tunado como hipervisor, nao como servidor):
+#   [8]  bridge-nf-call-* deixou de ser forcado em 1. Com 1, TODO pacote
+#        bridgeado de VM atravessa iptables + conntrack do host. Sem firewall
+#        do PVE ligado vai 0 e o br_netfilter nem e carregado; com firewall,
+#        as chaves ficam com o pve-firewall, que as liga sozinho.
+#   [9]  nf_conntrack_tcp_timeout_established=300 removido. Com firewall do
+#        PVE, conexao ociosa de VM por >5min virava INVALID e morria calada.
+#        nf_conntrack_max e o timeout pertencem ao host.fw quando ha firewall.
+#   [10] ZFS ARC: teto abaixo do zfs_arc_min era IGNORADO em silencio (arc_min
+#        default = RAM/32). Agora baixa o arc_min junto e confere no arcstats.
+#   [11] HugePages: conta o ARC no piso do host, recusa pool sem VM que o use
+#        (RAM travada a toa), avisa balloon/KSM e aceita paginas de 1G.
+#   [12] .env com aspas (bug 3 reintroduzido): 'Intel(R)' e '(balanceamento
+#        inutil)' quebravam o source e zeravam as chaves seguintes.
 #
 # NOVIDADES DA v3.0 (correcoes de conflito com pve-upgrade.sh):
 #   [1] numa_balancing agora e TOPOLOGY-AWARE: vira 0 automaticamente se
@@ -39,11 +54,11 @@ set -uo pipefail   # SEM '-e' de proposito: erros sao tratados por funcao.
 IFS=$'\n\t'
 
 readonly SCRIPT_NAME="proxmox_tune.sh"
-readonly SCRIPT_VERSION="3.2.0"
+readonly SCRIPT_VERSION="3.3.0"
 TOOL="proxmox-tune"
 VERSION="$SCRIPT_VERSION"
 
-# ==== BLOCO DE ESTADO COMPARTILHADO (schema 1) ==============================
+# ==== BLOCO DE ESTADO COMPARTILHADO (schema 2) ==============================
 # IDENTICO em pve-upgrade.sh e proxmox_tune.sh.
 # Ao alterar, altere nos DOIS e incremente STATE_SCHEMA.
 STATE_SCHEMA=2
@@ -87,20 +102,24 @@ state_facts_write() {
     prod=$(cat /sys/class/dmi/id/product_name 2>/dev/null || echo unknown)
     pve=$(pveversion 2>/dev/null | head -1 | grep -oP 'pve-manager/\K[^ /]+')
     deb=$(. /etc/os-release 2>/dev/null; echo "${VERSION_CODENAME:-unknown}")
+    # Aspas em TODO valor (bug 3): 'Intel(R)' sem aspas e erro de sintaxe no
+    # source, e todas as chaves seguintes chegam vazias. O que poderia fechar
+    # ou expandir dentro das aspas duplas sai antes.
+    cpu=${cpu//[\"\\$\`]/}; prod=${prod//[\"\\$\`]/}
 
     cat > "$FACTS_FILE" <<FACTS
 # gerado por ${TOOL} v${VERSION} em $(date -Is)
-FACT_HOST=$(hostname)
-FACT_PRODUCT=${prod}
-FACT_CPU=${cpu}
-FACT_CORES=${cores}
-FACT_RAM_MB=${ram}
-FACT_NUMA_NODES=${numa}
-FACT_PCID=${pcid}
-FACT_AES=${aes}
-FACT_KERNEL=$(uname -r)
-FACT_PVE=${pve:-desconhecido}
-FACT_DEBIAN=${deb}
+FACT_HOST="$(hostname)"
+FACT_PRODUCT="${prod}"
+FACT_CPU="${cpu}"
+FACT_CORES="${cores}"
+FACT_RAM_MB="${ram}"
+FACT_NUMA_NODES="${numa}"
+FACT_PCID="${pcid}"
+FACT_AES="${aes}"
+FACT_KERNEL="$(uname -r)"
+FACT_PVE="${pve:-desconhecido}"
+FACT_DEBIAN="${deb}"
 FACTS
 }
 
@@ -199,6 +218,7 @@ SKIP_UPGRADE=0
 FULL_UPGRADE=0
 FORCE=0                 # re-aplica mesmo se o estado do kernel ja bater
 HUGEPAGES_GB=0
+HUGEPAGES_SIZE="2M"     # 2M ou 1G
 SWAPPINESS=10
 GOVERNOR=""
 ZFS_ARC_GB=0
@@ -211,6 +231,13 @@ MEM_TOTAL_MB=0
 MEM_AVAIL_MB=0
 NUMA_BAL=1              # calculado em detect_numa_policy()
 NUMA_REASON=""
+PVE_FW="na"             # calculado em detect_firewall(): on | off | na
+PVE_FW_REASON=""
+
+# Caminhos que os testes reapontam para um sysroot falso.
+PVE_FW_CLUSTER="${PVE_FW_CLUSTER:-/etc/pve/firewall/cluster.fw}"
+QEMU_CONF_DIR="${QEMU_CONF_DIR:-/etc/pve/qemu-server}"
+ARCSTATS="${ARCSTATS:-/proc/spl/kstat/zfs/arcstats}"
 
 if [[ -t 1 ]]; then
     readonly C_RED=$'\033[0;31m'  C_GRN=$'\033[0;32m'  C_YEL=$'\033[1;33m'
@@ -271,6 +298,12 @@ OPCOES
                         initramfs).
   --hugepages <N>       Reserva N GB de HugePages NO BOOT via cmdline.
                         Detecta GRUB vs proxmox-boot-tool automaticamente.
+                        RECUSA se nenhuma VM tiver 'hugepages:' na config
+                        (pool ocioso = RAM travada); --force reserva assim mesmo.
+                        O ARC do ZFS entra na conta do piso de 8GB do host.
+  --hugepages-size <S>  2M (default) ou 1G. 1G rende mais para VM grande e so
+                        e confiavel reservado no boot; exige a flag pdpe1gb.
+                        A VM tem de usar o mesmo tamanho: 'hugepages: 1024'.
   --disable-ha          Desliga pve-ha-lrm e pve-ha-crm em host STANDALONE.
                         Libera RAM/CPU num no que nunca vai usar HA (util
                         nos R410/R610 com pouca memoria). RECUSA rodar se o
@@ -288,6 +321,10 @@ CUIDADOS EMBUTIDOS
   - Aborta se os repos apontarem para codename != sistema (upgrade em voo).
   - HugePages so via cmdline (reboot), nunca alocacao runtime em host vivo.
   - Modulos br_netfilter/nf_conntrack carregados antes do sysctl dependente.
+  - Firewall do PVE detectado: sem ele, bridge-nf-call-*=0 (trafego de VM nao
+    passa pelo iptables do host); com ele, bridge-nf e conntrack ficam com o
+    pve-firewall/host.fw, sem briga de valor.
+  - --zfs-arc abaixo do zfs_arc_min baixa o minimo junto e confere o efeito.
 
 EXEMPLOS
   bash ${SCRIPT_NAME} --dry-run
@@ -322,6 +359,13 @@ while [[ $# -gt 0 ]]; do
             shift
             [[ "${1:-}" =~ ^[0-9]+$ ]] && HUGEPAGES_GB="$1" || {
                 echo "Erro: --hugepages exige numero (GB)" >&2; exit 2; } ;;
+        --hugepages-size)
+            shift
+            case "${1:-}" in
+                2M|2m) HUGEPAGES_SIZE="2M" ;;
+                1G|1g) HUGEPAGES_SIZE="1G" ;;
+                *) echo "Erro: --hugepages-size exige 2M ou 1G" >&2; exit 2 ;;
+            esac ;;
         *) echo "Erro: flag desconhecida '$1'. Use --help." >&2; exit 2 ;;
     esac
     shift
@@ -398,11 +442,86 @@ detect_numa_policy() {
     fi
 }
 
+# ── [8] Firewall do PVE ──────────────────────────────────────────────────────
+# O firewall de VM so existe com 'enable: 1' no [OPTIONS] do cluster.fw; o
+# host.fw liga/desliga so as regras do proprio no. Sem ele, bridge-nf-call=1
+# e custo puro: cada pacote bridgeado de VM passa por iptables e conntrack.
+pve_fw_enabled() {   # [cluster.fw]
+    local f="${1:-$PVE_FW_CLUSTER}"
+    [[ -r "$f" ]] || return 1
+    awk '
+        /^[[:space:]]*\[/ { sec = toupper($0); gsub(/[[:space:]]/, "", sec); next }
+        sec == "[OPTIONS]" && /^[[:space:]]*enable[[:space:]]*:/ {
+            v = $0; sub(/^[^:]*:[[:space:]]*/, "", v); sub(/[[:space:]#].*$/, "", v)
+            on = (v == "1")
+        }
+        END { exit(on ? 0 : 1) }' "$f"
+}
+
+detect_firewall() {
+    if [[ ! -d /etc/pve ]]; then
+        PVE_FW="na"; PVE_FW_REASON="sem /etc/pve (host KVM generico)"
+        _log INFO "Firewall: ${PVE_FW_REASON} — bridge-nf e conntrack nao sao tocados"
+    elif pve_fw_enabled; then
+        PVE_FW="on"; PVE_FW_REASON="cluster.fw com enable: 1"
+        _log INFO "Firewall do PVE ATIVO (${PVE_FW_REASON})"
+        _log INFO "  bridge-nf-call-*, nf_conntrack_max e timeout established ficam com"
+        _log INFO "  o pve-firewall (Datacenter/No > Firewall > Options) — sem briga de valor"
+    else
+        PVE_FW="off"; PVE_FW_REASON="firewall do datacenter desligado"
+        _log INFO "Firewall do PVE desligado: bridge-nf-call-*=0 e sem br_netfilter"
+        _log INFO "  (trafego bridgeado das VMs deixa de atravessar o iptables do host)"
+    fi
+}
+
+# ── ZFS: leitura do arcstats ─────────────────────────────────────────────────
+arcstat_get() { awk -v k="$1" '$1 == k { print $3; exit }' "$ARCSTATS" 2>/dev/null; }
+
+# [10] O ZFS IGNORA zfs_arc_max <= zfs_arc_min, sem erro. O minimo default e
+# max(RAM/32, 32MB): 8GB num host de 256GB — '--zfs-arc 4' nao pegava. Devolve
+# o arc_min a gravar junto, ou nada quando o teto ja fica acima do piso.
+# Compara com o piso DEFAULT e nao so com o c_min atual: o atual pode ser o
+# que nos mesmos baixamos, e no proximo boot o default volta.
+zfs_arc_min_for() {   # <arc_max_bytes> <c_min_atual_bytes> <ram_bytes>
+    local max="$1" cmin="${2:-0}" ram="${3:-0}" floor
+    [[ "$cmin" =~ ^[0-9]+$ ]] || cmin=0
+    floor=$(( ram / 32 )); (( floor < 33554432 )) && floor=33554432
+    (( cmin > floor )) && floor=$cmin
+    (( floor >= max )) && echo $(( max / 2 ))
+    return 0
+}
+
+# ── [11] Demanda de hugepages das VMs deste no ───────────────────────────────
+# Saida (separada por espaco): <vms> <MB somados> <tamanho divergente> <com balloon>
+# So a secao principal do .conf conta: snapshots ([nome]) repetem as chaves.
+vm_hugepages_demand() {   # <tamanho do pool como o PVE escreve: 2 | 1024>
+    local want="$1" f hp mem bal n=0 mb=0 diff=0 balc=0
+    for f in "$QEMU_CONF_DIR"/*.conf; do
+        [[ -f "$f" ]] || continue
+        hp=$(awk  '/^\[/{exit} /^hugepages:/{print $2; exit}' "$f")
+        [[ -z "$hp" ]] && continue
+        mem=$(awk '/^\[/{exit} /^memory:/{print $2; exit}' "$f")
+        bal=$(awk '/^\[/{exit} /^balloon:/{print $2; exit}' "$f")
+        mem="${mem#current=}"; mem="${mem%%,*}"
+        [[ "$mem" =~ ^[0-9]+$ ]] || mem=512       # default do qemu-server
+        n=$((n+1)); mb=$((mb + mem))
+        [[ "$hp" != "any" && "$hp" != "$want" ]] && diff=$((diff+1))
+        # balloon ativo = alvo menor que a memoria (balloon: 0 desliga o device)
+        [[ "$bal" =~ ^[0-9]+$ ]] && (( bal > 0 && bal < mem )) && balc=$((balc+1))
+    done
+    echo "$n $mb $diff $balc"
+}
+
 # ── Assinatura do estado: mudou parametro ou kernel? ─────────────────────────
+# RAM entra em GB: cruzar os 32GB troca dirty_ratio por dirty_bytes. Lida
+# direto do /proc e nao do MEM_TOTAL_MB, que ainda e 0 quando o main compara.
+# O firewall entra porque liga/desliga metade do bloco de rede.
 tune_signature() {
-    printf '%s|%s|%s|%s|%s|%s|%s|%s\n' \
+    local ram_gb; ram_gb=$(awk '/MemTotal/{printf "%d", $2/1048576}' /proc/meminfo 2>/dev/null)
+    printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
         "$SCRIPT_VERSION" "$(uname -r)" "$SWAPPINESS" "$NUMA_BAL" \
-        "$GOVERNOR" "$ZFS_ARC_GB" "$HUGEPAGES_GB" "$STRICT_RPFILTER$DISABLE_HA" \
+        "$GOVERNOR" "$ZFS_ARC_GB" "$HUGEPAGES_GB$HUGEPAGES_SIZE" \
+        "$STRICT_RPFILTER$DISABLE_HA" "$PVE_FW" "${ram_gb:-0}" \
         | sha256sum | cut -c1-16
 }
 
@@ -418,20 +537,27 @@ tune_state_matches() {
 tune_state_write() {
     [[ "$DRY_RUN" == "1" ]] && return 0
     mkdir -p "$TUNE_DIR" 2>/dev/null || true
+    # Aspas em todo valor (bug 3): NUMA_REASON tem parenteses e espacos, e sem
+    # aspas o source do pve-upgrade.sh --validate abortava no meio.
+    local pve rpf
+    pve=$(pveversion 2>/dev/null | head -1 | grep -oP 'pve-manager/\K[^ /]+')
+    rpf=$([[ $STRICT_RPFILTER -eq 1 ]] && echo strict || echo loose)
     cat > "$(tune_state_file)" <<EOF
 # estado do tuning aplicado neste kernel — lido por pve-upgrade.sh --validate
-TUNE_VERSION=$SCRIPT_VERSION
-TUNE_SIG=$(tune_signature)
-TUNE_APPLIED=$(date -Is)
-TUNE_KERNEL=$(uname -r)
-TUNE_PVE=$(pveversion 2>/dev/null | head -1 | grep -oP 'pve-manager/\K[^ /]+')
-TUNE_SWAPPINESS=$SWAPPINESS
-TUNE_NUMA_BAL=$NUMA_BAL
-TUNE_NUMA_REASON=$NUMA_REASON
-TUNE_GOVERNOR=${GOVERNOR:-nao-alterado}
-TUNE_ZFS_ARC_GB=$ZFS_ARC_GB
-TUNE_HUGEPAGES_GB=$HUGEPAGES_GB
-TUNE_RPFILTER=$([[ $STRICT_RPFILTER -eq 1 ]] && echo strict || echo loose)
+TUNE_VERSION="$SCRIPT_VERSION"
+TUNE_SIG="$(tune_signature)"
+TUNE_APPLIED="$(date -Is)"
+TUNE_KERNEL="$(uname -r)"
+TUNE_PVE="${pve}"
+TUNE_SWAPPINESS="$SWAPPINESS"
+TUNE_NUMA_BAL="$NUMA_BAL"
+TUNE_NUMA_REASON="${NUMA_REASON//\"/}"
+TUNE_GOVERNOR="${GOVERNOR:-nao-alterado}"
+TUNE_ZFS_ARC_GB="$ZFS_ARC_GB"
+TUNE_HUGEPAGES_GB="$HUGEPAGES_GB"
+TUNE_HUGEPAGES_SIZE="$HUGEPAGES_SIZE"
+TUNE_RPFILTER="${rpf}"
+TUNE_FIREWALL="$PVE_FW"
 EOF
     _log OK "Estado gravado: $(tune_state_file)"
 }
@@ -544,7 +670,11 @@ safe_upgrade() {
 # =============================================================================
 configure_modules() {
     _log STEP "Modulos de kernel"
-    local needed=(br_netfilter nf_conntrack) cc=(tcp_bbr)
+    # [8] br_netfilter so com firewall do PVE ligado: e ele que desvia o
+    # trafego bridgeado das VMs para o iptables. Sem firewall, nao carregar e
+    # o jeito de o custo ser zero, e nao so "desligado por sysctl".
+    local needed=(nf_conntrack) cc=(tcp_bbr)
+    [[ "$PVE_FW" == "on" ]] && needed=(br_netfilter nf_conntrack)
     local loaded=() m
     for m in "${needed[@]}" "${cc[@]}"; do
         if lsmod 2>/dev/null | grep -q "^${m} "; then
@@ -648,6 +778,43 @@ vm.dirty_background_ratio = 5"
     fi
     _log INFO "rp_filter=${rpf} ($([[ $rpf -eq 1 ]] && echo strict || echo loose))"
 
+    # [9] Conntrack. nf_conntrack_tcp_timeout_established fica no default do
+    # kernel (5 dias): 300s matava em silencio conexao ociosa de VM (SSH, pool
+    # de banco) quando o firewall do PVE descarta INVALID. Com firewall ligado,
+    # max e timeout sao do host.fw — o pve-firewall reescreve os dois.
+    local ct_block="# -- Conntrack (buckets vao via modprobe.d, nao aqui) --------------"
+    if [[ "$PVE_FW" != "on" ]]; then
+        ct_block="${ct_block}
+net.netfilter.nf_conntrack_max = 524288"
+    else
+        ct_block="${ct_block}
+# nf_conntrack_max: gerenciado pelo pve-firewall (host.fw)"
+    fi
+    ct_block="${ct_block}
+net.netfilter.nf_conntrack_tcp_timeout_time_wait = 30
+net.netfilter.nf_conntrack_tcp_timeout_close_wait = 15"
+
+    # [8] Bridge. Com firewall: o pve-firewall liga sozinho, nao disputamos.
+    # Sem firewall: 0 — e so emite se a arvore existir (modulo carregado por
+    # outra via), senao o aplicador acusaria chave "inexistente" a toa.
+    local br_block="# -- Bridge ----------------------------------------------------------"
+    case "$PVE_FW" in
+        on)  br_block="${br_block}
+# bridge-nf-call-*: gerenciado pelo pve-firewall (firewall ativo)" ;;
+        off) if [[ -d /proc/sys/net/bridge ]]; then
+                 br_block="${br_block}
+# firewall do PVE desligado: trafego de VM fora do iptables do host
+net.bridge.bridge-nf-call-iptables = 0
+net.bridge.bridge-nf-call-ip6tables = 0
+net.bridge.bridge-nf-call-arptables = 0"
+             else
+                 br_block="${br_block}
+# br_netfilter nao carregado: trafego de VM ja nao passa pelo iptables"
+             fi ;;
+        *)   br_block="${br_block}
+# host sem PVE: bridge-nf nao e tocado" ;;
+    esac
+
     apply_sysctl_tolerant "$SYSCTL_FILE" << SYSCTLEOF
 # -- Memoria virtual -----------------------------------------------
 vm.swappiness = ${SWAPPINESS}
@@ -668,16 +835,9 @@ net.ipv4.neigh.default.gc_thresh1 = 4096
 net.ipv4.neigh.default.gc_thresh2 = 8192
 net.ipv4.neigh.default.gc_thresh3 = 16384
 
-# -- Conntrack (buckets vao via modprobe.d, nao aqui) --------------
-net.netfilter.nf_conntrack_max = 524288
-net.netfilter.nf_conntrack_tcp_timeout_established = 300
-net.netfilter.nf_conntrack_tcp_timeout_time_wait = 30
-net.netfilter.nf_conntrack_tcp_timeout_close_wait = 15
+${ct_block}
 
-# -- Bridge (exige br_netfilter, carregado antes) ------------------
-net.bridge.bridge-nf-call-iptables = 1
-net.bridge.bridge-nf-call-ip6tables = 1
-net.bridge.bridge-nf-call-arptables = 0
+${br_block}
 
 # -- Rede: buffers e filas -----------------------------------------
 net.core.rmem_max = 67108864
@@ -693,7 +853,7 @@ net.core.netdev_budget_usecs = 8000
 # -- Congestion control --------------------------------------------
 # BBR afeta so trafego ORIGINADO no host (backup PBS, migracao,
 # replicacao ZFS). Trafego de guest e bridgeado em L2 e nao passa
-# pela pilha TCP do host.
+# pela pilha TCP do host (nem pelo netfilter, sem bridge-nf-call).
 net.core.default_qdisc = fq
 net.ipv4.tcp_congestion_control = bbr
 
@@ -730,7 +890,7 @@ detect_bootloader() {
 }
 
 strip_hp_tokens() {
-    sed -E 's/(^| )hugepagesz=[^ ]+//g; s/(^| )hugepages=[0-9]+//g; s/(^| )transparent_hugepage=[^ ]+//g' <<<"$1" \
+    sed -E 's/(^| )default_hugepagesz=[^ ]+//g; s/(^| )hugepagesz=[^ ]+//g; s/(^| )hugepages=[0-9]+//g; s/(^| )transparent_hugepage=[^ ]+//g' <<<"$1" \
         | tr -s ' ' | sed 's/^ *//; s/ *$//'
 }
 
@@ -739,27 +899,88 @@ configure_hugepages() {
         _log INFO "HugePages desligado. Use --hugepages N para reservar N GB no boot."
         return 0
     fi
-    _log STEP "HugePages (via cmdline — efeito apos reboot)"
+    _log STEP "HugePages ${HUGEPAGES_SIZE} (via cmdline — efeito apos reboot)"
     mem_snapshot
+
+    # page_mb = tamanho da pagina; vm_size = como o PVE escreve na VM
+    local page_mb=2 vm_size=2
+    if [[ "$HUGEPAGES_SIZE" == "1G" ]]; then
+        page_mb=1024; vm_size=1024
+        if ! grep -qw pdpe1gb /proc/cpuinfo 2>/dev/null; then
+            _log ERROR "CPU sem a flag pdpe1gb: nao ha paginas de 1G. Use --hugepages-size 2M."
+            return 1
+        fi
+    fi
 
     local req_mb=$((HUGEPAGES_GB * 1024))
     local max_safe_mb=$(( MEM_TOTAL_MB / 2 ))
     local reserve_floor_mb=$(( 8 * 1024 ))
 
+    # [11] Quem vai consumir o pool? Reservar sem VM que use e travar RAM que
+    # nem as VMs comuns, nem o KSM, nem o ARC alcancam.
+    local vms vm_mb divergent ballooned
+    IFS=' ' read -r vms vm_mb divergent ballooned <<<"$(vm_hugepages_demand "$vm_size")"
+    if [[ "${vms:-0}" -eq 0 ]]; then
+        if [[ "$FORCE" -eq 0 ]]; then
+            _log WARN "Nenhuma VM deste no tem 'hugepages:' na config."
+            _log WARN "  Pool sem consumidor e RAM travada: nem VM comum, nem KSM, nem ARC usam."
+            _log WARN "  Configure as VMs (hugepages: ${vm_size}) e rode de novo,"
+            _log WARN "  ou use --force para reservar assim mesmo. PULANDO hugepages."
+            state_event "HUGEPAGES_SKIP" "sem VM consumidora"
+            return 0
+        fi
+        _log WARN "--force: reservando sem VM consumidora — o pool fica ocioso ate configurar"
+    else
+        _log INFO "${vms} VM(s) com hugepages: ${vm_mb}MB de RAM configurada"
+        if [[ "$vm_mb" -gt "$req_mb" ]]; then
+            _log WARN "As VMs pedem ${vm_mb}MB e o pool tera ${req_mb}MB."
+            _log WARN "  O PVE tenta alocar o resto na partida da VM; com pagina de 1G e"
+            _log WARN "  RAM fragmentada isso falha e a VM NAO SOBE."
+        elif [[ $(( req_mb - vm_mb )) -ge 1024 ]]; then
+            _log WARN "Pool $(( (req_mb - vm_mb) / 1024 ))GB maior que a demanda das VMs: RAM ociosa."
+        fi
+        [[ "${divergent:-0}" -gt 0 ]] && \
+            _log WARN "${divergent} VM(s) pedem tamanho diferente de ${HUGEPAGES_SIZE} ('hugepages: ${vm_size}'): nao usam este pool"
+        [[ "${ballooned:-0}" -gt 0 ]] && {
+            _log WARN "${ballooned} VM(s) com hugepages E balloon ativo: memoria em hugepage"
+            _log WARN "  nao e devolvida pelo balloon nem deduplicada pelo KSM. Desligue um dos dois."; }
+    fi
+
     if [[ "$req_mb" -gt "$max_safe_mb" ]]; then
         _log WARN "${HUGEPAGES_GB}GB excede 50% da RAM — limitando a $((max_safe_mb/1024))GB"
         req_mb="$max_safe_mb"
     fi
-    if [[ $(( MEM_TOTAL_MB - req_mb )) -lt "$reserve_floor_mb" ]]; then
-        _log ERROR "Deixaria menos de 8GB para o host — ABORTANDO hugepages."
+
+    # [11] O ARC do ZFS disputa a mesma RAM. O teto que vale e o pedido agora
+    # (--zfs-arc) ou o efetivo no arcstats.
+    local arc_mb=0 cmax
+    if [[ "$ZFS_ARC_GB" -gt 0 ]]; then
+        arc_mb=$(( ZFS_ARC_GB * 1024 ))
+        [[ "$arc_mb" -gt $(( MEM_TOTAL_MB / 2 )) ]] && arc_mb=$(( MEM_TOTAL_MB / 2 ))
+    else
+        cmax=$(arcstat_get c_max)
+        [[ "$cmax" =~ ^[0-9]+$ ]] && arc_mb=$(( cmax / 1048576 ))
+    fi
+    if [[ $(( MEM_TOTAL_MB - req_mb - arc_mb )) -lt "$reserve_floor_mb" ]]; then
+        _log ERROR "HugePages ${req_mb}MB + ARC ${arc_mb}MB deixariam menos de 8GB para o host."
+        [[ "$arc_mb" -gt 0 ]] && _log ERROR "  Reduza o ARC com --zfs-arc ou peca menos hugepages."
+        _log ERROR "ABORTANDO hugepages."
+        state_event "HUGEPAGES_REFUSED" "req=${req_mb} arc=${arc_mb} total=${MEM_TOTAL_MB}"
         return 1
     fi
+    [[ "$arc_mb" -gt 0 ]] && _log INFO "Piso do host conferido com ARC de ${arc_mb}MB"
     [[ "$req_mb" -gt "$MEM_AVAIL_MB" ]] && \
         _log WARN "RAM disponivel agora (${MEM_AVAIL_MB}MB) < reserva (${req_mb}MB); no boot reserva antes das VMs"
 
-    local nr_pages=$(( req_mb / 2 ))
+    local nr_pages=$(( req_mb / page_mb ))
+    if [[ "$nr_pages" -lt 1 ]]; then
+        _log ERROR "Reserva menor que uma pagina de ${HUGEPAGES_SIZE} — nada a fazer"; return 1
+    fi
     local hp_args="hugepagesz=2M hugepages=${nr_pages} transparent_hugepage=madvise"
-    _log INFO "Reservando ${nr_pages} hugepages de 2MB = $((nr_pages*2/1024))GB"
+    # 1G so e confiavel no boot: em runtime a RAM ja esta fragmentada.
+    [[ "$HUGEPAGES_SIZE" == "1G" ]] && \
+        hp_args="default_hugepagesz=1G hugepagesz=1G hugepages=${nr_pages} transparent_hugepage=madvise"
+    _log INFO "Reservando ${nr_pages} hugepages de ${HUGEPAGES_SIZE} = $(( nr_pages * page_mb / 1024 ))GB"
 
     case "$(detect_bootloader)" in
         pbt)
@@ -799,7 +1020,7 @@ configure_hugepages() {
         echo madvise > /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null && \
             _log OK "THP em madvise (runtime)"
     fi
-    _log WARN "HugePages so valem APOS REBOOT. As VMs precisam de 'hugepages: 2'"
+    _log WARN "HugePages so valem APOS REBOOT. As VMs precisam de 'hugepages: ${vm_size}'"
     _log WARN "na config para usar o pool, senao ele fica ocioso."
 }
 
@@ -877,16 +1098,45 @@ configure_zfs_arc() {
     fi
     local arc_bytes=$(( arc_mb * 1024 * 1024 ))
 
-    if [[ "$DRY_RUN" != "1" && -w /sys/module/zfs/parameters/zfs_arc_max ]]; then
-        echo "$arc_bytes" > /sys/module/zfs/parameters/zfs_arc_max 2>/dev/null && \
-            _log OK "zfs_arc_max=${arc_bytes} em runtime (encolhe gradualmente)"
+    # [10] Teto <= piso e ignorado pelo ZFS sem erro. Baixa o arc_min junto.
+    local arc_min_bytes cmin
+    cmin=$(arcstat_get c_min)
+    arc_min_bytes=$(zfs_arc_min_for "$arc_bytes" "${cmin:-0}" $(( MEM_TOTAL_MB * 1048576 )))
+    if [[ -n "$arc_min_bytes" ]]; then
+        local piso_mb=$(( MEM_TOTAL_MB / 32 ))
+        [[ "$cmin" =~ ^[0-9]+$ ]] && (( cmin / 1048576 > piso_mb )) && piso_mb=$(( cmin / 1048576 ))
+        _log WARN "Teto ${arc_mb}MB <= piso do ARC (${piso_mb}MB: c_min atual ou RAM/32):"
+        _log WARN "  o ZFS ignoraria o teto calado. Baixando zfs_arc_min para $(( arc_min_bytes / 1048576 ))MB."
     fi
 
+    local p=/sys/module/zfs/parameters
+    if [[ "$DRY_RUN" != "1" && -w "$p/zfs_arc_max" ]]; then
+        # ordem importa: o piso desce ANTES, senao o teto novo e recusado
+        if [[ -n "$arc_min_bytes" ]]; then
+            echo "$arc_min_bytes" > "$p/zfs_arc_min" 2>/dev/null || \
+                _log WARN "zfs_arc_min recusado em runtime"
+        fi
+        echo "$arc_bytes" > "$p/zfs_arc_max" 2>/dev/null || _log WARN "zfs_arc_max recusado em runtime"
+        # O parametro le de volta o que foi escrito mesmo quando ignorado; quem
+        # diz a verdade e o c_max do arcstats.
+        local efetivo; efetivo=$(arcstat_get c_max)
+        if [[ "$efetivo" == "$arc_bytes" ]]; then
+            _log OK "zfs_arc_max=${arc_bytes} efetivo (arcstats c_max confere; encolhe gradualmente)"
+        elif [[ -n "$efetivo" ]]; then
+            _log WARN "ZFS NAO aplicou o teto: arcstats c_max=${efetivo}, pedido ${arc_bytes}"
+            _log WARN "  confira zfs_arc_min/zfs_arc_sys_free; o modprobe.d vale no proximo boot"
+            state_event "ZFS_ARC_IGNORED" "pedido=${arc_bytes} c_max=${efetivo}"
+        fi
+    fi
+
+    local zfs_opts="zfs_arc_max=${arc_bytes}"
+    [[ -n "$arc_min_bytes" ]] && zfs_opts="zfs_arc_min=${arc_min_bytes} ${zfs_opts}"
     write_if_changed "$ZFS_MODPROBE_FILE" <<ZFSEOF
 # ${ZFS_MODPROBE_FILE}
 # Gerenciado por ${SCRIPT_NAME} v${SCRIPT_VERSION}
 # gerado-em: $(date -u +%Y-%m-%dT%H:%M:%SZ)
-options zfs zfs_arc_max=${arc_bytes}
+# zfs_arc_max <= zfs_arc_min e ignorado sem erro: o min vai junto quando precisa
+options zfs ${zfs_opts}
 ZFSEOF
     if [[ "$WRITE_CHANGED" == "1" ]]; then
         if command -v update-initramfs >/dev/null 2>&1; then
@@ -969,16 +1219,38 @@ verify() {
 
     _log INFO "HugePages runtime: $(awk '/HugePages_Total/{print $2}' /proc/meminfo 2>/dev/null || echo 0)"
 
-    # Colisao de chaves entre arquivos de /etc/sysctl.d (vence o nome maior)
-    local dup
-    dup=$(grep -hoP '^\s*\K[a-z0-9_.]+(?=\s*=)' /etc/sysctl.d/*.conf /etc/sysctl.conf 2>/dev/null \
-          | sort | uniq -d)
+    local bnf="-"
+    [[ -r /proc/sys/net/bridge/bridge-nf-call-iptables ]] && \
+        bnf=$(cat /proc/sys/net/bridge/bridge-nf-call-iptables)
+    _log INFO "firewall PVE: ${PVE_FW} | bridge-nf-call-iptables=${bnf} (- = br_netfilter fora)"
+    if [[ "$PVE_FW" == "off" && "$bnf" == "1" ]]; then
+        _log WARN "bridge-nf-call-iptables=1 sem firewall do PVE: outro arquivo ou servico religou."
+        _log WARN "  Trafego de VM seguindo pelo iptables do host. Veja as colisoes abaixo."
+    fi
+
+    # Colisao de chaves entre TODOS os diretorios que o systemd-sysctl le —
+    # o /usr/lib/sysctl.d e onde os pacotes (inclusive o PVE) poem os deles.
+    # Mesmo nome de arquivo: /etc mascara /run, que mascara /usr/lib. Entre
+    # nomes diferentes vence o de nome maior, independente do diretorio.
+    local files=() seen_names=" " seen_real=" " f base real
+    for f in /etc/sysctl.d/*.conf /run/sysctl.d/*.conf /usr/local/lib/sysctl.d/*.conf \
+             /usr/lib/sysctl.d/*.conf /lib/sysctl.d/*.conf /etc/sysctl.conf; do
+        [[ -f "$f" ]] || continue
+        base=$(basename "$f"); real=$(readlink -f "$f" 2>/dev/null || echo "$f")
+        [[ "$seen_real" == *" $real "* ]] && continue          # /lib -> /usr/lib
+        [[ "$f" != /etc/sysctl.conf && "$seen_names" == *" $base "* ]] && continue
+        seen_real+="$real "; seen_names+="$base "
+        files+=("$f")
+    done
+    local dup=""
+    [[ ${#files[@]} -gt 0 ]] && \
+        dup=$(grep -hoP '^\s*\K[a-z0-9_.-]+(?=\s*=)' "${files[@]}" 2>/dev/null | sort | uniq -d)
     if [[ -n "$dup" ]]; then
         _log WARN "chaves definidas em mais de um arquivo (vence o de nome maior):"
         local k
         while read -r k; do
             [[ -z "$k" ]] && continue
-            _log WARN "  $k -> $(grep -lE "^\s*${k//./\\.}\s*=" /etc/sysctl.d/*.conf /etc/sysctl.conf 2>/dev/null | tr '\n' ' ')"
+            _log WARN "  $k -> $(grep -lE "^\s*${k//./\\.}\s*=" "${files[@]}" 2>/dev/null | tr '\n' ' ')"
         done <<<"$dup"
     fi
 
@@ -1004,6 +1276,7 @@ main() {
 
     check_requirements
     detect_numa_policy         # [1] antes do sysctl, define NUMA_BAL
+    detect_firewall            # [8] antes dos modulos e do sysctl, define PVE_FW
 
     # [6] Ja tunado neste kernel com estes parametros?
     if tune_state_matches && [[ "$FORCE" -eq 0 && "$SKIP_UPGRADE" -eq 1 ]]; then
@@ -1023,9 +1296,9 @@ main() {
     safe_upgrade
     configure_modules          # ANTES do sysctl — ordem importa
     configure_sysctl
+    configure_zfs_arc          # ANTES das hugepages: o ARC entra no piso do host
     configure_hugepages
     configure_governor
-    configure_zfs_arc
     configure_ha_services
     verify
 }
