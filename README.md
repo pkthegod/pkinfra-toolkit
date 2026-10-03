@@ -2,7 +2,7 @@
 
 Ferramentas de upgrade, tuning e validação para frota Debian / Proxmox VE.
 
-**Versão do pacote:** 2026.09.26
+**Versão do pacote:** 2026.10.03
 
 ---
 
@@ -22,7 +22,7 @@ chama o `install.sh` de dentro do pacote. Flags passam direto:
 curl -fsSL .../bootstrap.sh | sudo bash -s -- --dry-run
 
 # versão fixa + digest fixo — é assim que se instala em produção
-curl -fsSL .../bootstrap.sh | sudo bash -s -- --version 2026.09.26 --sha256 <hash>
+curl -fsSL .../bootstrap.sh | sudo bash -s -- --version 2026.10.03 --sha256 <hash>
 
 # forçar tudo, independente do papel do host
 curl -fsSL .../bootstrap.sh | sudo bash -s -- --all
@@ -40,8 +40,8 @@ curl -fsSL .../bootstrap.sh | sudo bash -s -- --all
 > que pode ter mudado desde a última vez. Para produção, aponte para a tag:
 >
 > ```bash
-> curl -fsSL https://raw.githubusercontent.com/pkthegod/pkinfra-toolkit/v2026.09.26/bootstrap.sh \
->   | sudo bash -s -- --version 2026.09.26 --sha256 <hash>
+> curl -fsSL https://raw.githubusercontent.com/pkthegod/pkinfra-toolkit/v2026.10.03/bootstrap.sh \
+>   | sudo bash -s -- --version 2026.10.03 --sha256 <hash>
 > ```
 >
 > Assim as duas metades ficam pinadas: o instalador pela tag, o pacote pelo
@@ -50,7 +50,7 @@ curl -fsSL .../bootstrap.sh | sudo bash -s -- --all
 ### Manual (tarball do release)
 
 ```bash
-V=2026.09.26
+V=2026.10.03
 curl -fsSLO https://github.com/pkthegod/pkinfra-toolkit/releases/download/v$V/pkinfra-toolkit-$V.tar.gz
 curl -fsSLO https://github.com/pkthegod/pkinfra-toolkit/releases/download/v$V/pkinfra-toolkit-$V.tar.gz.sha256
 sha256sum -c pkinfra-toolkit-$V.tar.gz.sha256
@@ -82,7 +82,7 @@ done
 |---|---|---|
 | `bin/pkassess.sh` | 1.0 | **levantamento, benchmark e prescricao — comece aqui** |
 | `lib/pkops.sh` | 1.0 | estado, eventos, callbacks, manifest, drift |
-| `bin/pve-upgrade.sh` | 3.6.0 | upgrade PVE 6→7→8→9.2 |
+| `bin/pve-upgrade.sh` | 3.6.1 | upgrade PVE 6→7→8→9.2 |
 | `bin/proxmox_tune.sh` | 3.3.0 | tuning do host PVE — **hipervisor-aware** (firewall, ARC, hugepages) |
 | `bin/tune-profile.sh` | 1.0 | tuning de guest — 8 perfis de carga |
 | `bin/setup-unbound.sh` | 2.0 | resolvedor recursivo validante |
@@ -96,7 +96,18 @@ Após instalar, tudo fica em `/usr/local/sbin/` e a referência em
 
 ---
 
-## Novidades — 2026.09.26
+## Novidades — 2026.10.03
+
+### `pve-upgrade.sh` 3.6.1 — o bloqueio do Ceph explica o caminho
+
+No salto 8→9 com Ceph abaixo do Squid, o script só dizia
+`PVE 9 exige Squid 19.2` e parava. Agora mostra os saltos que faltam
+(Quincy → Reef → Squid, com o link da wiki do Proxmox de cada um), a ordem
+de restart, o critério de pronto (`ceph versions` só com 19.2 e
+`HEALTH_OK`) e o alerta para `/etc/pve/ceph.conf` que sobrou de um Ceph que
+não está em uso.
+
+## Novidades anteriores
 
 ### `proxmox_tune.sh` 3.3.0 — o host tunado como hipervisor
 
@@ -349,8 +360,8 @@ normalizado para LF. O mesmo commit gera **o mesmo `.tar` byte a byte em
 qualquer host**, e é isso que permite conferir um release contra o código:
 
 ```bash
-git checkout v2026.09.26 && ./build.sh
-# compare dist/pkinfra-toolkit-2026.09.26.tar.sha256 com o publicado no release
+git checkout v2026.10.03 && ./build.sh
+# compare dist/pkinfra-toolkit-2026.10.03.tar.sha256 com o publicado no release
 ```
 
 O digest do **`.tar.gz`** não atravessa hosts: a saída do gzip varia entre
@@ -362,9 +373,9 @@ fazer.
 **Para publicar uma versão:**
 
 ```bash
-echo 2026.09.26 > VERSION
-git commit -am "release: 2026.09.26"
-git tag v2026.09.26
+echo 2026.10.03 > VERSION
+git commit -am "release: 2026.10.03"
+git tag v2026.10.03
 git push origin main --tags     # o CI monta, verifica e publica o release
 ```
 
