@@ -44,7 +44,7 @@
 set -uo pipefail
 
 TOOL="pve-upgrade"
-VERSION="3.6.0"
+VERSION="3.6.1"
 
 # ==== BLOCO DE ESTADO COMPARTILHADO (schema 2) ==============================
 # IDENTICO em pve-upgrade.sh e proxmox_tune.sh.
@@ -1140,7 +1140,18 @@ phase_8_to_9() {
   fi
   if has_ceph; then
     local cv; cv=$(ceph version 2>/dev/null | grep -oP 'version \K\d+')
-    [[ -n "$cv" && ${cv:-0} -lt 19 ]] && die "Ceph v$cv — PVE 9 exige Squid 19.2"
+    if [[ -n "$cv" && ${cv:-0} -lt 19 ]]; then
+      # O Proxmox so documenta um salto de release do Ceph por vez; Quincy
+      # passa por Reef antes de Squid. Sempre separado do salto do PVE.
+      err "Ceph v$cv — PVE 9 exige Squid 19.2 ANTES do salto (no PVE 8, separado)"
+      [[ $cv -le 17 ]] && err "  1. Quincy -> Reef : https://pve.proxmox.com/wiki/Ceph_Quincy_to_Reef"
+      err "  $([[ $cv -le 17 ]] && echo 2 || echo 1). Reef -> Squid  : https://pve.proxmox.com/wiki/Ceph_Reef_to_Squid"
+      err "  em cada salto: noout, mon -> mgr -> osd no a no, require-osd-release, unset noout"
+      err "  pronto quando 'ceph versions' so mostra 19.2 e 'ceph -s' da HEALTH_OK"
+      err "  sem Ceph em uso? /etc/pve/ceph.conf pode ser sobra — confira 'ceph -s'"
+      err "  antes de mexer (o /etc/pve e compartilhado com o cluster inteiro)"
+      die "atualize o Ceph e rode de novo"
+    fi
   fi
 
   run_checker pve8to9
